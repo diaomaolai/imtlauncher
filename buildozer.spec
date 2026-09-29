@@ -43,8 +43,9 @@ android.accept_sdk_license = True
 android.enable_androidx = True
 
 # 使用手动克隆的 p4a 稳定版（workflow 里完成 clone/checkout）。
+# 克隆放在项目目录外（../p4a），避免被当成 APP 源码打包。
 # 不用 p4a.branch：buildozer 的 --single-branch 克隆拉不到维护标签的提交。
-p4a.source_dir = p4a
+p4a.source_dir = ../p4a
 
 # 日志级别（2 = debug，方便排查问题）
 log_level = 2

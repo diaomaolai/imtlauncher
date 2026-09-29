@@ -26,15 +26,16 @@ jobs:
 
       - name: Prepare pinned python-for-android (v2026.05.09)
         run: |
-          git clone https://github.com/kivy/python-for-android.git p4a
-          git -C p4a fetch origin tag v2026.05.09
-          git -C p4a checkout v2026.05.09
-          git -C p4a log -1 --oneline
+          # 克隆到项目目录外，避免 p4a 源码被当成 APP 资源打包
+          git clone https://github.com/kivy/python-for-android.git ../p4a
+          git -C ../p4a fetch origin tag v2026.05.09
+          git -C ../p4a checkout v2026.05.09
+          git -C ../p4a log -1 --oneline
           # Kivy 运行时不需要 requests；其依赖 charset-normalizer 无安卓
           # 轮子会导致纯 Python 模块安装失败，清空该配方的 python_depends。
           python3 - <<'PATCH'
           import re
-          p = "p4a/pythonforandroid/recipes/kivy/__init__.py"
+          p = "../p4a/pythonforandroid/recipes/kivy/__init__.py"
           t = open(p).read()
           t2, n = re.subn(
               r"^    python_depends = \[.*\]$",

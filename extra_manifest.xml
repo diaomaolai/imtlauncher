@@ -1,8 +1,9 @@
-<?xml version="1.0" encoding="utf-8"?>
 <!--
   Android 11+（API 30+）包可见性声明。
   不声明的话，getLaunchIntentForPackage("com.moutai.mall") 会返回 null，
-  无法检测/启动 i茅台。本文件内容会被合并进最终 AndroidManifest.xml。
+  无法检测/启动 i茅台。
+  注意：本文件内容会被原样嵌入 AndroidManifest.xml，
+  不要包含 <?xml ...?> 声明，否则清单 XML 非法。
 -->
 <queries>
     <package android:name="com.moutai.mall" />
