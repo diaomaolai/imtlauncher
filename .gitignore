@@ -1,0 +1,14 @@
+# Python 缓存
+__pycache__/
+*.pyc
+
+# Buildozer 构建产物
+bin/
+buildozer/
+.buildozer/
+*.apk
+*.aab
+
+# 系统杂项
+Thumbs.db
+.DS_Store
