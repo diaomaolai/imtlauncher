@@ -20,9 +20,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            git zip unzip openjdk-17-jdk autoconf libtool pkg-config \
-            zlib1g-dev libncurses-dev libstdc++6 cmake libffi-dev \
-            libssl-dev build-essential ccache
+            git zip unzip openjdk-17-jdk autoconf automake libtool \
+            libltdl-dev pkg-config zlib1g-dev libncurses-dev libstdc++6 \
+            cmake libffi-dev libssl-dev build-essential ccache
+
+      - name: Prepare pinned python-for-android (v2026.05.09)
+        run: |
+          git clone https://github.com/kivy/python-for-android.git p4a
+          git -C p4a fetch origin tag v2026.05.09
+          git -C p4a checkout v2026.05.09
+          git -C p4a log -1 --oneline
 
       - name: Install Buildozer
         run: |
