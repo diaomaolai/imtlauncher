@@ -42,5 +42,9 @@ android.permissions = QUERY_ALL_PACKAGES
 android.accept_sdk_license = True
 android.enable_androidx = True
 
+# 固定使用 python-for-android 稳定版（默认 master 开发分支会引入未验证
+# 组件，例如旧 libffi 在 Ubuntu 24.04 上 autoreconf 失败）
+p4a.branch = v2026.05.09
+
 # 日志级别（2 = debug，方便排查问题）
 log_level = 2
