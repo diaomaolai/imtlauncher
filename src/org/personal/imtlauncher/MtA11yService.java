@@ -18,6 +18,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
@@ -36,6 +37,9 @@ import java.util.regex.Pattern;
 public class MtA11yService extends AccessibilityService {
 
     private static MtA11yService sInstance;
+
+    /** 拟人化手势随机源（落点抖动、时长、轨迹） */
+    private final Random mRandom = new Random();
 
     /** Python 侧据此判断无障碍是否已授权连接 */
     public static boolean isReady() {
@@ -229,6 +233,77 @@ public class MtA11yService extends AccessibilityService {
         return dispatchTap(x, y);
     }
 
+    /**
+     * 拟人化点击：落点在 jitterRatio 范围内小幅随机、按压时长随机
+     * （60~140ms）、按压停留期间手指有 1~5px 轻微位移。
+     * jitterRatio 按屏幕比例给出（如 0.01 ≈ 10px）。
+     */
+    public boolean tapRatioHuman(float xRatio, float yRatio,
+                                 float jitterRatio) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            return false;
+        }
+        DisplayMetrics m = realMetrics();
+        float jitterX = jitterRatio * m.widthPixels;
+        float jitterY = jitterRatio * m.heightPixels;
+        float x = clamp(
+                m.widthPixels * xRatio
+                        + (mRandom.nextFloat() * 2f - 1f) * jitterX,
+                0, m.widthPixels - 1);
+        float y = clamp(
+                m.heightPixels * yRatio
+                        + (mRandom.nextFloat() * 2f - 1f) * jitterY,
+                0, m.heightPixels - 1);
+
+        Path path = new Path();
+        path.moveTo(x, y);
+        float driftX = (mRandom.nextFloat() * 2f - 1f) * 5f;
+        float driftY = (mRandom.nextFloat() * 2f - 1f) * 5f;
+        path.lineTo(x + driftX, y + driftY);
+
+        long holdMs = 60L + mRandom.nextInt(81); // 60~140ms
+        return dispatchPath(path, holdMs);
+    }
+
+    /**
+     * 拟人化上滑：横向基准位置小幅随机、轨迹分 8 段逐点抖动、
+     * 纵向按 smoothstep 加减速（非匀速）、整体时长在
+     * minDurationMs~maxDurationMs 间随机。
+     */
+    public boolean swipeUpRatiosHuman(float cxRatio, float topRatio,
+                                      float bottomRatio,
+                                      long minDurationMs,
+                                      long maxDurationMs,
+                                      float jitterRatio) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            return false;
+        }
+        DisplayMetrics m = realMetrics();
+        float jitter = jitterRatio * m.widthPixels;
+        float baseX = m.widthPixels * cxRatio;
+        float yBottom = m.heightPixels * bottomRatio;
+        float yTop = m.heightPixels * topRatio;
+
+        Path path = new Path();
+        float startX = baseX + (mRandom.nextFloat() * 2f - 1f) * jitter;
+        path.moveTo(startX, yBottom);
+        final int steps = 8;
+        for (int i = 1; i <= steps; i++) {
+            float frac = i / (float) steps;
+            float s = frac * frac * (3f - 2f * frac); // smoothstep
+            float y = yBottom + (yTop - yBottom) * s;
+            float x = baseX + (mRandom.nextFloat() * 2f - 1f) * jitter;
+            path.lineTo(x, y);
+        }
+
+        long durationMs = minDurationMs;
+        long span = maxDurationMs - minDurationMs;
+        if (span > 0) {
+            durationMs += mRandom.nextInt((int) span + 1);
+        }
+        return dispatchPath(path, durationMs);
+    }
+
     /** 全局返回 */
     public boolean globalBack() {
         return performGlobalAction(GLOBAL_ACTION_BACK);
@@ -378,10 +453,7 @@ public class MtA11yService extends AccessibilityService {
         }
         Path path = new Path();
         path.moveTo(x, y);
-        GestureDescription.StrokeDescription stroke =
-                new GestureDescription.StrokeDescription(path, 0, 1);
-        return dispatchGestureWithResult(
-                new GestureDescription.Builder().addStroke(stroke).build());
+        return dispatchPath(path, 1);
     }
 
     private boolean dispatchSwipe(int x1, int y1, int x2, int y2,
@@ -392,10 +464,19 @@ public class MtA11yService extends AccessibilityService {
         Path path = new Path();
         path.moveTo(x1, y1);
         path.lineTo(x2, y2);
+        return dispatchPath(path, durationMs);
+    }
+
+    /** 按给定路径与时长派发手势并等待结果 */
+    private boolean dispatchPath(Path path, long durationMs) {
         GestureDescription.StrokeDescription stroke =
                 new GestureDescription.StrokeDescription(path, 0, durationMs);
         return dispatchGestureWithResult(
                 new GestureDescription.Builder().addStroke(stroke).build());
+    }
+
+    private static float clamp(float v, float lo, float hi) {
+        return v < lo ? lo : (v > hi ? hi : v);
     }
 
     private boolean dispatchGestureWithResult(GestureDescription gesture) {

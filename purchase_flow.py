@@ -20,7 +20,8 @@ from datetime import timedelta
 
 from config import (
     TARGET_PACKAGE,
-    I_GOU_TAB_TEXT,
+    I_GOU_TAB_TEXTS,
+    I_GOU_TAB_RATIO,
     PRODUCT_KEYWORDS,
     SALE_TIME_REGEX,
     SECOND_CLICK_EXTRA_SECONDS,
@@ -30,6 +31,11 @@ from config import (
     BUY_BUTTON_REGION,
     BACK_LIST_TIMEOUT,
     FALLBACK_FINAL_CLICK_RATIO,
+    TAP_JITTER_RATIO,
+    FINAL_TAP_JITTER_RATIO,
+    SWIPE_JITTER_RATIO,
+    SWIPE_DURATION_MIN_MS,
+    SWIPE_DURATION_MAX_MS,
 )
 
 # 状态常量
@@ -144,17 +150,10 @@ class PurchaseFlow(object):
 
     # ---------------- 第一阶段 ----------------
     def _update_idle(self, now):
-        """到达启动时刻则开始；安卓环境先确认无障碍已连接"""
+        """到达启动时刻则启动 i茅台（启动本身不依赖无障碍）"""
         if self.launch_target is None or now is None:
             return
         if now < self.launch_target:
-            return
-
-        if self.launcher.is_android and not self.bridge.is_connected():
-            self._finish(
-                False,
-                u"无障碍服务未开启，请先到设置中开启后重新定时",
-            )
             return
 
         self.state = LAUNCHING
@@ -176,6 +175,14 @@ class PurchaseFlow(object):
 
     def _update_enter_i_gou(self, dt):
         """点击 i购 标签，直到商品列表出现或超时"""
+        # 点击操作依赖无障碍；i茅台已启动，在此给出明确提示
+        if self.launcher.is_android and not self.bridge.is_connected():
+            self._finish(
+                False,
+                u"i茅台已启动，但无障碍服务未开启，请先到设置中开启后重新定时",
+            )
+            return
+
         if self.bridge.node_contains_all(PRODUCT_KEYWORDS):
             self._set_state(SEARCHING, u"已进入 i购，查找目标商品…")
             return
@@ -188,7 +195,17 @@ class PurchaseFlow(object):
         self._timer += dt
         if self._timer >= 1.5:
             print("正在访问i购")
-            self.bridge.click_text(I_GOU_TAB_TEXT)
+            clicked = False
+            for tab_text in I_GOU_TAB_TEXTS:
+                if self.bridge.click_text(tab_text):
+                    clicked = True
+                    break
+            if not clicked:
+                # 标签为自绘控件、按文字点不中：拟人化坐标点击
+                self.bridge.tap_ratio_human(
+                    I_GOU_TAB_RATIO[0], I_GOU_TAB_RATIO[1],
+                    TAP_JITTER_RATIO,
+                )
             self._timer = 0.0
 
     def _update_searching(self, dt, now):
@@ -207,7 +224,11 @@ class PurchaseFlow(object):
         if self._stage_elapsed - (self._last_scroll or 0.0) >= SCROLL_INTERVAL:
             print("正在模拟人为滑动")
             if not self.bridge.scroll_forward():
-                self.bridge.swipe_up()
+                self.bridge.swipe_up_human(
+                    min_duration_ms=SWIPE_DURATION_MIN_MS,
+                    max_duration_ms=SWIPE_DURATION_MAX_MS,
+                    jitter_ratio=SWIPE_JITTER_RATIO,
+                )
             self._scroll_count += 1
             self._last_scroll = self._stage_elapsed
             self.status = u"查找商品中（已上滑 %d 次）" % self._scroll_count
@@ -320,7 +341,9 @@ class PurchaseFlow(object):
         """按预设屏幕比例兜底点击；未配置或点击失败则失败收尾"""
         if FALLBACK_FINAL_CLICK_RATIO is not None:
             x_ratio, y_ratio = FALLBACK_FINAL_CLICK_RATIO
-            if self.bridge.tap_ratio(x_ratio, y_ratio):
+            if self.bridge.tap_ratio_human(
+                x_ratio, y_ratio, FINAL_TAP_JITTER_RATIO
+            ):
                 self._finish(True, success_text)
                 return
         self._finish(False, u"未识别到可点击内容，且兜底点击未成功")

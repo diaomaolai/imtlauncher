@@ -157,6 +157,24 @@ class A11yBridge(object):
         except Exception:
             return False
 
+    def swipe_up_human(self, cx_ratio=0.5, top_ratio=0.30,
+                       bottom_ratio=0.80, min_duration_ms=320,
+                       max_duration_ms=520, jitter_ratio=0.02):
+        """拟人化上滑：轨迹抖动、加减速、时长随机（坐标为屏幕比例）"""
+        service = self._service_or_none()
+        if service is None:
+            return False
+        try:
+            return bool(
+                service.swipeUpRatiosHuman(
+                    float(cx_ratio), float(top_ratio),
+                    float(bottom_ratio), int(min_duration_ms),
+                    int(max_duration_ms), float(jitter_ratio)
+                )
+            )
+        except Exception:
+            return False
+
     def tap_ratio(self, x_ratio, y_ratio):
         """按屏幕比例点击坐标（兜底）"""
         service = self._service_or_none()
@@ -164,6 +182,20 @@ class A11yBridge(object):
             return False
         try:
             return bool(service.tapRatio(float(x_ratio), float(y_ratio)))
+        except Exception:
+            return False
+
+    def tap_ratio_human(self, x_ratio, y_ratio, jitter_ratio=0.01):
+        """拟人化点击：落点小幅随机、按压时长随机、轻微位移"""
+        service = self._service_or_none()
+        if service is None:
+            return False
+        try:
+            return bool(
+                service.tapRatioHuman(
+                    float(x_ratio), float(y_ratio), float(jitter_ratio)
+                )
+            )
         except Exception:
             return False
 
