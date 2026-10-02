@@ -66,19 +66,18 @@ jobs:
 
       - name: Pre-install Android SDK packages (with retries)
         run: |
-          # buildozer 默认 SDK 根目录；提前放好平台与构建工具，
+          # buildozer（当前版本）使用 legacy 布局 tools/bin/sdkmanager。
+          # 提前放好 sdkmanager、平台 33 与 build-tools 37，
           # 避免构建中途下载遇到坏包（archive is not a ZIP）直接失败。
           SDK_ROOT="$HOME/.buildozer/android/platform/android-sdk"
           mkdir -p "$SDK_ROOT"
-          CMDBIN="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-          if [ ! -x "$CMDBIN" ]; then
-            URL="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
-            curl -fsSL --retry 5 -o /tmp/cmdtools.zip "$URL"
-            rm -rf "$SDK_ROOT/cmdline-tools"
-            mkdir -p "$SDK_ROOT/cmdline-tools"
-            unzip -q /tmp/cmdtools.zip -d "$SDK_ROOT/cmdline-tools"
-            mv "$SDK_ROOT/cmdline-tools/cmdline-tools" "$SDK_ROOT/cmdline-tools/latest"
+          if [ ! -x "$SDK_ROOT/tools/bin/sdkmanager" ]; then
+            curl -fsSL --retry 5 -o /tmp/sdktools.zip \
+              https://dl.google.com/android/repository/tools_r25.2.3-linux.zip
+            unzip -q /tmp/sdktools.zip -d "$SDK_ROOT"
           fi
+          CMDBIN="$SDK_ROOT/tools/bin/sdkmanager"
+          chmod +x "$CMDBIN"
           yes | "$CMDBIN" --sdk_root="$SDK_ROOT" --licenses >/dev/null 2>&1 || true
           ok=0
           for i in 1 2 3 4 5; do
