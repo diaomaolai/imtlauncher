@@ -31,22 +31,18 @@ jobs:
           git -C ../p4a fetch origin tag v2026.05.09
           git -C ../p4a checkout v2026.05.09
           git -C ../p4a log -1 --oneline
-          # Kivy 运行时不需要 requests；其依赖 charset-normalizer 无安卓
-          # 轮子会导致纯 Python 模块安装失败，清空该配方的 python_depends。
+          # Kivy 配方的 python_depends 中 requests 会拉入
+          # charset-normalizer（无安卓轮子，纯 Python 模块安装失败）。
+          # 只移除 requests，保留 certifi/chardet/idna/urllib3/filetype，
+          # 其中 filetype 是 Kivy 图像模块运行时必需，缺失会启动即崩。
           python3 - <<'PATCH'
-          import re
           p = "../p4a/pythonforandroid/recipes/kivy/__init__.py"
           t = open(p).read()
-          t2, n = re.subn(
-              r"^    python_depends = \[.*\]$",
-              "    python_depends = []",
-              t,
-              count=1,
-              flags=re.M,
-          )
-          assert n == 1, "python_depends line not found"
-          open(p, "w").write(t2)
-          print("patched kivy recipe python_depends")
+          old = "    python_depends = ['certifi', 'chardet', 'idna', 'requests', 'urllib3', 'filetype']"
+          new = "    python_depends = ['certifi', 'chardet', 'idna', 'urllib3', 'filetype']"
+          assert old in t, "kivy python_depends line not found"
+          open(p, "w").write(t.replace(old, new, 1))
+          print("removed requests from kivy recipe python_depends")
           PATCH
           # <service> 必须位于 <application> 内，而 extra_manifest_xml
           # 只插入 <manifest> 下；把无障碍服务片段注入模板的
