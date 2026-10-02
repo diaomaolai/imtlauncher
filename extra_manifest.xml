@@ -1,6 +1,9 @@
 <!--
   本文件内容会被原样嵌入 AndroidManifest.xml 的 <manifest> 内部，
   不要包含 <?xml ...?> 声明，否则清单 XML 非法。
+  注意：<service>/<activity> 等组件必须放在 <application> 内部，
+  不能写在本文件里；无障碍服务的注入见 service_manifest_snippet.xml，
+  由 CI 构建时补丁进 p4a 模板的 <application> 中。
 -->
 
 <!-- Android 11+（API 30+）包可见性声明：
@@ -8,16 +11,3 @@
 <queries>
     <package android:name="com.moutai.mall" />
 </queries>
-
-<!-- 无障碍服务：自动点击 i购 / 商品 / 购买按钮。
-     BIND_ACCESSIBILITY_SERVICE 为签名级权限，写在组件上，
-     用户需手动到 设置→无障碍 中开启一次 -->
-<service
-    android:name="org.personal.imtlauncher.MtA11yService"
-    android:exported="false"
-    android:label="i茅台启动器无障碍服务"
-    android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-    <intent-filter>
-        <action android:name="android.accessibilityservice.AccessibilityService" />
-    </intent-filter>
-</service>

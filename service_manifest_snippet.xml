@@ -1,0 +1,21 @@
+<!--
+  无障碍服务清单片段。
+
+  说明：p4a 的 --extra-manifest-xml 内容被插入到 <manifest> 节点下，
+  而 <service> 必须位于 <application> 内部，直接放会报
+  "unexpected element <service> found in <manifest>"。
+  因此本片段由 GitHub Actions 构建时注入 p4a 的
+  AndroidManifest.tmpl.xml 的 </application> 之前（见 workflow）。
+
+  BIND_ACCESSIBILITY_SERVICE 为签名级权限，写在组件上；
+  用户需手动到 设置→无障碍 中开启一次。
+-->
+<service
+    android:name="org.personal.imtlauncher.MtA11yService"
+    android:exported="false"
+    android:label="i茅台启动器无障碍服务"
+    android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+    <intent-filter>
+        <action android:name="android.accessibilityservice.AccessibilityService" />
+    </intent-filter>
+</service>

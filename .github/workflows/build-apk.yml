@@ -48,6 +48,20 @@ jobs:
           open(p, "w").write(t2)
           print("patched kivy recipe python_depends")
           PATCH
+          # <service> 必须位于 <application> 内，而 extra_manifest_xml
+          # 只插入 <manifest> 下；把无障碍服务片段注入模板的
+          # </application> 之前。
+          python3 - <<'PATCH'
+          tpl = "../p4a/pythonforandroid/bootstraps/_sdl_common/build/templates/AndroidManifest.tmpl.xml"
+          snippet = open("service_manifest_snippet.xml").read()
+          t = open(tpl).read()
+          marker = "    </application>"
+          assert marker in t, "application close tag not found"
+          assert "MtA11yService" not in t, "service already injected"
+          t = t.replace(marker, snippet + "\n" + marker, 1)
+          open(tpl, "w").write(t)
+          print("injected accessibility service into manifest template")
+          PATCH
 
       - name: Install Buildozer
         run: |
