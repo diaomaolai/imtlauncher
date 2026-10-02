@@ -11,10 +11,14 @@ source.include_exts = py,png,jpg,kv,atlas,xml,ttf,ttc
 source.exclude_dirs = bin,buildozer,.github
 
 # 版本号
-version = 0.2.0
+version = 0.3.0
 
 # 依赖：python3 + kivy 界面 + pyjnius 调安卓原生 API
 requirements = python3,kivy,pyjnius
+
+# 加入自定义 Java 源码（无障碍服务 MtA11yService），
+# src 目录按包名层级组织：src/org/personal/imtlauncher/*.java
+android.add_src = src
 
 # 竖屏、不全屏（保留状态栏）
 orientation = portrait

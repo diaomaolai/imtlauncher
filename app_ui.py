@@ -5,29 +5,28 @@
 包含：
 - 状态提示
 - 定时时间输入（HH:MM:SS）+ 设置定时按钮 + 倒计时
-- 大号手动启动按钮
-- 目标包名设置（一般无需修改）
 """
 
 from kivy.graphics import Color, Rectangle
+from kivy.metrics import dp
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
 
-from config import APP_TITLE, TARGET_PACKAGE, DEFAULT_TIME_TEXT
+from config import APP_TITLE, DEFAULT_TIME_TEXT
 
 
 class MainScreen(BoxLayout):
-    """主界面"""
+    """主界面：状态提示 + 定时设置 + 倒计时"""
 
-    def __init__(self, launcher, **kwargs):
+    def __init__(self, **kwargs):
         super(MainScreen, self).__init__(**kwargs)
-        self.launcher = launcher
         self.orientation = "vertical"
-        self.padding = [36, 48, 36, 32]
-        self.spacing = 14
+        # padding/spacing 用 dp：随屏幕密度自动缩放，不同分辨率观感一致
+        self.padding = [dp(36), dp(64), dp(36), dp(48)]
+        self.spacing = dp(16)
 
         # 浅色背景
         with self.canvas.before:
@@ -38,21 +37,21 @@ class MainScreen(BoxLayout):
         # 标题
         self.title_label = Label(
             text=APP_TITLE,
-            font_size="28sp",
+            font_size="30sp",
             bold=True,
             color=(0.35, 0.12, 0.05, 1),
-            size_hint=(1, 0.08),
+            size_hint=(1, 0.10),
         )
         self.add_widget(self.title_label)
 
         # 状态文字
         self.status_label = Label(
             text=u"正在检测……",
-            font_size="16sp",
+            font_size="17sp",
             color=(0.25, 0.25, 0.25, 1),
             halign="center",
             valign="middle",
-            size_hint=(1, 0.13),
+            size_hint=(1, 0.16),
         )
         self.status_label.bind(
             width=lambda instance, value: setattr(
@@ -61,76 +60,48 @@ class MainScreen(BoxLayout):
         )
         self.add_widget(self.status_label)
 
+        # 弹簧
+        self.add_widget(Widget(size_hint=(1, 0.08)))
+
         # ---- 定时区域 ----
         self.time_caption = Label(
             text=u"定时启动时间（HH:MM:SS）",
-            font_size="14sp",
+            font_size="15sp",
             color=(0.35, 0.35, 0.35, 1),
-            size_hint=(1, 0.05),
+            size_hint=(1, 0.06),
         )
         self.add_widget(self.time_caption)
 
         self.time_input = TextInput(
             text=DEFAULT_TIME_TEXT,
-            font_size="20sp",
+            font_size="22sp",
             halign="center",
             multiline=False,
-            size_hint=(1, 0.08),
+            size_hint=(1, 0.09),
         )
         self.add_widget(self.time_input)
 
         self.schedule_btn = Button(
             text=u"设置定时",
-            font_size="19sp",
+            font_size="20sp",
             bold=True,
             color=(1, 1, 1, 1),
             background_color=(0.15, 0.45, 0.25, 1),
-            size_hint=(1, 0.09),
+            size_hint=(1, 0.10),
         )
         self.add_widget(self.schedule_btn)
 
         self.countdown_label = Label(
             text=u"倒计时：未设定",
-            font_size="18sp",
+            font_size="20sp",
             bold=True,
             color=(0.72, 0.16, 0.10, 1),
-            size_hint=(1, 0.07),
+            size_hint=(1, 0.09),
         )
         self.add_widget(self.countdown_label)
 
         # 弹簧
-        self.add_widget(Widget(size_hint=(1, 0.05)))
-
-        # 手动启动按钮
-        self.launch_btn = Button(
-            text=u"立即启动 i茅台",
-            font_size="22sp",
-            bold=True,
-            color=(1, 1, 1, 1),
-            background_color=(0.72, 0.16, 0.10, 1),
-            size_hint=(1, 0.15),
-        )
-        self.add_widget(self.launch_btn)
-
-        # 弹簧
-        self.add_widget(Widget(size_hint=(1, 0.08)))
-
-        # 包名设置（一般无需修改，留作兼容未来版本）
-        self.pkg_caption = Label(
-            text=u"目标包名（一般无需修改）",
-            font_size="13sp",
-            color=(0.45, 0.45, 0.45, 1),
-            size_hint=(1, 0.04),
-        )
-        self.add_widget(self.pkg_caption)
-
-        self.package_input = TextInput(
-            text=TARGET_PACKAGE,
-            font_size="15sp",
-            multiline=False,
-            size_hint=(1, 0.06),
-        )
-        self.add_widget(self.package_input)
+        self.add_widget(Widget(size_hint=(1, 0.12)))
 
     def _redraw_background(self, *args):
         self._background.pos = self.pos
@@ -151,15 +122,6 @@ class MainScreen(BoxLayout):
         self.schedule_btn.background_color = (
             (0.55, 0.25, 0.25, 1) if armed else (0.15, 0.45, 0.25, 1)
         )
-
-    # ---- 包名相关 ----
-    def get_package(self):
-        """获取输入框中的包名（已去空白）"""
-        return self.package_input.text.strip()
-
-    def set_package(self, package_name):
-        """设置包名"""
-        self.package_input.text = package_name
 
     def set_status(self, text):
         """更新状态提示"""

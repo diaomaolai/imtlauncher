@@ -1,10 +1,23 @@
 <!--
-  Android 11+（API 30+）包可见性声明。
-  不声明的话，getLaunchIntentForPackage("com.moutai.mall") 会返回 null，
-  无法检测/启动 i茅台。
-  注意：本文件内容会被原样嵌入 AndroidManifest.xml，
+  本文件内容会被原样嵌入 AndroidManifest.xml 的 <manifest> 内部，
   不要包含 <?xml ...?> 声明，否则清单 XML 非法。
 -->
+
+<!-- Android 11+（API 30+）包可见性声明：
+     不声明的话 getLaunchIntentForPackage("com.moutai.mall") 返回 null -->
 <queries>
     <package android:name="com.moutai.mall" />
 </queries>
+
+<!-- 无障碍服务：自动点击 i购 / 商品 / 购买按钮。
+     BIND_ACCESSIBILITY_SERVICE 为签名级权限，写在组件上，
+     用户需手动到 设置→无障碍 中开启一次 -->
+<service
+    android:name="org.personal.imtlauncher.MtA11yService"
+    android:exported="false"
+    android:label="i茅台启动器无障碍服务"
+    android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+    <intent-filter>
+        <action android:name="android.accessibilityservice.AccessibilityService" />
+    </intent-filter>
+</service>
