@@ -6,6 +6,8 @@ import android.graphics.Path;
 import android.graphics.Rect;
 import android.os.Build;
 import android.util.DisplayMetrics;
+import android.view.Display;
+import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
@@ -27,8 +29,9 @@ import java.util.regex.Pattern;
  * 能力：按文字（含 contentDescription）查找控件并点击、
  * 判断文字是否存在、列表前滚、手势上滑、按比例坐标点击、返回。
  *
- * 服务在代码中完成配置（无需 res/xml 资源），Python 通过 pyjnius
- * 调用 getInstance() 上的方法驱动自动化流程。
+ * 服务配置（事件类型、canPerformGestures 手势能力等）由
+ * res/xml/imt_a11y_config.xml 经清单 meta-data 提供；Python 通过
+ * pyjnius 调用 getInstance() 上的方法驱动自动化流程。
  */
 public class MtA11yService extends AccessibilityService {
 
@@ -211,7 +214,7 @@ public class MtA11yService extends AccessibilityService {
      */
     public boolean swipeUpRatios(float cxRatio, float topRatio,
                                  float bottomRatio, long durationMs) {
-        DisplayMetrics m = getResources().getDisplayMetrics();
+        DisplayMetrics m = realMetrics();
         int x = (int) (m.widthPixels * cxRatio);
         int yTop = (int) (m.heightPixels * topRatio);
         int yBottom = (int) (m.heightPixels * bottomRatio);
@@ -220,7 +223,7 @@ public class MtA11yService extends AccessibilityService {
 
     /** 按屏幕比例点击坐标（兜底手段） */
     public boolean tapRatio(float xRatio, float yRatio) {
-        DisplayMetrics m = getResources().getDisplayMetrics();
+        DisplayMetrics m = realMetrics();
         int x = (int) (m.widthPixels * xRatio);
         int y = (int) (m.heightPixels * yRatio);
         return dispatchTap(x, y);
@@ -429,10 +432,25 @@ public class MtA11yService extends AccessibilityService {
     // 坐标区域工具
     // ------------------------------------------------------------------
 
+    /**
+     * 真实屏幕尺寸（含状态栏、导航栏）。
+     * 注意：dispatchGesture 坐标与 getBoundsInScreen 均按全屏坐标；
+     * getResources().getDisplayMetrics() 在非全屏窗口下只给 APP 可用区
+     * （实测 1080x2161，物理屏 1080x2400），用它换算会让底部按钮区域
+     * 整体上移、兜底点击落空。
+     */
+    private DisplayMetrics realMetrics() {
+        DisplayMetrics m = new DisplayMetrics();
+        WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+        Display display = wm.getDefaultDisplay();
+        display.getRealMetrics(m);
+        return m;
+    }
+
     /** 把屏幕比例区域换算成像素矩形 */
     private Rect ratioRect(float minXRatio, float minYRatio,
                            float maxXRatio, float maxYRatio) {
-        DisplayMetrics m = getResources().getDisplayMetrics();
+        DisplayMetrics m = realMetrics();
         return new Rect(
                 (int) (m.widthPixels * minXRatio),
                 (int) (m.heightPixels * minYRatio),
