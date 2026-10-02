@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  无障碍服务配置（Android 标准方式，经清单中的 service meta-data 引用）。
+  关键：canPerformGestures 必须在此声明，dispatchGesture 才会工作；
+  现代 Android 中 AccessibilityServiceInfo 的 capabilities 为私有字段、
+  setCapabilities 为隐藏 API，无法在 onServiceConnected 中用代码设置。
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows|flagRequestEnhancedWebAccessibility|flagIncludeNotImportantViews"
+    android:canRetrieveWindowContent="true"
+    android:canPerformGestures="true"
+    android:notificationTimeout="80" />

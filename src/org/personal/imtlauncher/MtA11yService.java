@@ -1,7 +1,6 @@
 package org.personal.imtlauncher;
 
 import android.accessibilityservice.AccessibilityService;
-import android.accessibilityservice.AccessibilityServiceInfo;
 import android.accessibilityservice.GestureDescription;
 import android.graphics.Path;
 import android.graphics.Rect;
@@ -48,21 +47,11 @@ public class MtA11yService extends AccessibilityService {
     protected void onServiceConnected() {
         super.onServiceConnected();
         sInstance = this;
-
-        AccessibilityServiceInfo info = new AccessibilityServiceInfo();
-        info.eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
-                | AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED;
-        info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC;
-        info.flags = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
-                | AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
-                | AccessibilityServiceInfo.FLAG_REQUEST_ENHANCED_WEB_ACCESSIBILITY
-                | AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS;
-        info.notificationTimeout = 80;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            info.capabilities |=
-                    AccessibilityServiceInfo.CAPABILITY_CAN_PERFORM_GESTURES;
-        }
-        setServiceInfo(info);
+        // 服务配置（事件类型、标志、canPerformGestures 手势能力等）由
+        // res/xml/imt_a11y_config.xml 经清单 meta-data 提供。
+        // 不要在此调用 setServiceInfo 覆盖：程序构造的配置无法声明手势
+        // 能力（capabilities 为私有字段、setCapabilities 为隐藏 API），
+        // 一旦覆盖，XML 中声明的 canPerformGestures 会丢失。
     }
 
     @Override

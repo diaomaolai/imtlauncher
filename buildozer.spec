@@ -38,6 +38,10 @@ android.archs = arm64-v8a
 # Android 11+ 包可见性：声明要检测/启动的 i茅台
 android.extra_manifest_xml = extra_manifest.xml
 
+# 无障碍服务配置（复制到 res/xml，供 service 的 meta-data 引用，
+# 在其中声明 canPerformGestures 手势能力）
+android.res_xml = a11y_res/imt_a11y_config.xml
+
 # 兜底扫描全部已安装应用需要（个人自用、不上架 Google Play；
 # 上架 Google Play 会被限制，侧载安装不受影响）
 android.permissions = QUERY_ALL_PACKAGES
