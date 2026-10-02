@@ -6,7 +6,6 @@ import android.accessibilityservice.GestureDescription;
 import android.graphics.Path;
 import android.graphics.Rect;
 import android.os.Build;
-import android.os.CountDownLatch;
 import android.util.DisplayMetrics;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
@@ -18,6 +17,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -59,7 +59,8 @@ public class MtA11yService extends AccessibilityService {
                 | AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS;
         info.notificationTimeout = 80;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            info.canPerformGestures = true;
+            info.capabilities |=
+                    AccessibilityServiceInfo.CAPABILITY_CAN_PERFORM_GESTURES;
         }
         setServiceInfo(info);
     }
@@ -265,6 +266,11 @@ public class MtA11yService extends AccessibilityService {
             }
         }
         return result;
+    }
+
+    private void findByText(AccessibilityNodeInfo node, String needle,
+                            List<AccessibilityNodeInfo> out) {
+        findByText(node, needle, null, out);
     }
 
     private void findByText(AccessibilityNodeInfo node, String needle,
