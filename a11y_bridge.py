@@ -219,6 +219,23 @@ class A11yBridge(object):
         except Exception:
             return False
 
+    def tap_raw_human(self, raw_x, raw_y, raw_max_x, raw_max_y,
+                      jitter_ratio=0.01):
+        """按 getevent 原始触摸坐标直接点击（配置里直接填原始值）"""
+        service = self._service_or_none()
+        if service is None:
+            return False
+        try:
+            return bool(
+                service.tapRawHuman(
+                    int(raw_x), int(raw_y),
+                    int(raw_max_x), int(raw_max_y),
+                    float(jitter_ratio),
+                )
+            )
+        except Exception:
+            return False
+
     def back(self):
         """全局返回"""
         service = self._service_or_none()

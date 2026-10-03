@@ -316,6 +316,26 @@ public class MtA11yService extends AccessibilityService {
     }
 
     /**
+     * 按 getevent 原始触摸坐标直接点击（配置里直接填原始值，无需
+     * 人工换算比例）。rawX/rawY 为 getevent 上报的
+     * ABS_MT_POSITION_X / ABS_MT_POSITION_Y 值；rawMaxX/rawMaxY
+     * 为 getevent -lp 给出的触摸屏原始坐标最大值（本机 5399/11999）。
+     */
+    public boolean tapRawHuman(int rawX, int rawY,
+                               int rawMaxX, int rawMaxY,
+                               float jitterRatio) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            return false;
+        }
+        if (rawMaxX <= 0 || rawMaxY <= 0) {
+            return false;
+        }
+        float xRatio = (float) rawX / (float) rawMaxX;
+        float yRatio = (float) rawY / (float) rawMaxY;
+        return tapRatioHuman(xRatio, yRatio, jitterRatio);
+    }
+
+    /**
      * 拟人化上滑：横向基准位置小幅随机、轨迹分 8 段逐点抖动、
      * 纵向按 smoothstep 加减速（非匀速）、整体时长在
      * minDurationMs~maxDurationMs 间随机。

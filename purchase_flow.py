@@ -20,7 +20,10 @@ from datetime import timedelta
 
 from config import (
     TARGET_PACKAGE,
-    I_GOU_TAB_RATIO,
+    I_GOU_RAW_X,
+    I_GOU_RAW_Y,
+    TOUCH_RAW_MAX_X,
+    TOUCH_RAW_MAX_Y,
     LAUNCH_SETTLE_SECONDS,
     HOME_READY_MARKERS,
     HOME_MARKER_MIN_HITS,
@@ -229,8 +232,10 @@ class PurchaseFlow(object):
         # 唯一一次点击：首页就绪且尚未点击时执行
         if self._click_count == 0 and home_ready:
             print("正在访问i购")
-            self.bridge.tap_ratio_human(
-                I_GOU_TAB_RATIO[0], I_GOU_TAB_RATIO[1],
+            # 直接用 getevent 原始坐标值点击（不手算比例）
+            self.bridge.tap_raw_human(
+                I_GOU_RAW_X, I_GOU_RAW_Y,
+                TOUCH_RAW_MAX_X, TOUCH_RAW_MAX_Y,
                 TAP_JITTER_RATIO,
             )
             self._click_count += 1

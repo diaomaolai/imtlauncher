@@ -5,7 +5,7 @@
 
 # APP 基本信息
 APP_TITLE = u"i茅台启动器"
-APP_VERSION = "0.3.6"
+APP_VERSION = "0.3.7"
 
 # i茅台 安卓包名（官方包名，应用宝等各渠道一致）
 TARGET_PACKAGE = "com.moutai.mall"
@@ -25,11 +25,13 @@ DEFAULT_TIME_TEXT = u"08:00:01"
 #   第1次 (1000, 2223)，第2次 (1036, 2218)；
 # 物理屏 1080x2400，取两次平均换算为屏幕比例。
 I_GOU_TAB_TEXTS = (u"i购", u"购")  # 仅作文字记录，点击一律走坐标
-# 用户实测 getevent 原始坐标 ABS_MT_POSITION_X=4445 ABS_MT_POSITION_Y=11115
-# （触摸屏原始范围 X:0~5399 Y:0~11999，物理屏 1080x2400）：
-#   屏幕 X = 4445/5399*1080 = 889
-#   屏幕 Y = 11115/11999*2400 = 2223
-I_GOU_TAB_RATIO = (0.823, 0.926)
+# i购位置：直接填 getevent 原始触摸坐标值（不要换算比例）
+#   getevent 实测：ABS_MT_POSITION_X = 4445，ABS_MT_POSITION_Y = 11115
+#   触摸屏原始范围（adb shell getevent -lp）：X 0~5399，Y 0~11999
+I_GOU_RAW_X = 4445
+I_GOU_RAW_Y = 11115
+TOUCH_RAW_MAX_X = 5399
+TOUCH_RAW_MAX_Y = 11999
 
 # 启动 i茅台后给启动 Intent 的短暂缓冲（秒），之后进入"等待首页"阶段。
 # 注意：i茅台冷启动实测需 10~15 秒（开屏广告/加固解压），
