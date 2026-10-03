@@ -5,7 +5,7 @@
 
 # APP 基本信息
 APP_TITLE = u"i茅台启动器"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 
 # i茅台 安卓包名（官方包名，应用宝等各渠道一致）
 TARGET_PACKAGE = "com.moutai.mall"
@@ -27,6 +27,19 @@ I_GOU_TAB_TEXTS = (u"i购", u"购")
 # 点击容器实测 bounds=[216,2043][432,2161]，中心 (324,2102)，
 # 物理屏 1080x2400 换算比例：
 I_GOU_TAB_RATIO = (0.30, 0.876)
+
+# 启动 i茅台后等待冷启动的秒数，再点击 "购" 标签
+LAUNCH_SETTLE_SECONDS = 2
+
+# 购页面顶部的分类特征词（筛选标签）。点击购后必须识别到其中
+# 至少 I_GOU_MARKER_MIN_HITS 个，才确认已进入购页面、开始滑动；
+# 避免在首页/其他标签页上盲目重复点击。
+I_GOU_PAGE_MARKERS = (u"全部", u"经典", u"精品")
+I_GOU_MARKER_MIN_HITS = 2
+# 购标签最多点击次数、每次重试间隔，以及进入购阶段的总超时
+I_GOU_CLICK_MAX = 3
+I_GOU_CLICK_RETRY_INTERVAL = 2.0
+ENTER_I_GOU_TIMEOUT = 10.0
 
 # 目标商品：同一控件文字需同时包含以下全部关键字才算找到
 # （列表上的完整名称约为：飞天53%vol 500ml贵州茅台酒(带杯)）

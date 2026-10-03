@@ -77,6 +77,16 @@ class A11yBridge(object):
         except Exception:
             return False
 
+    def count_texts(self, texts):
+        """统计给定文字中有多少个在当前页面存在（用于确认购页面）"""
+        service = self._service_or_none()
+        if service is None:
+            return 0
+        try:
+            return int(service.countDistinctTexts(list(texts)))
+        except Exception:
+            return 0
+
     def click_text(self, text, region=None):
         """
         按文字查找并点击，成功返回 True。

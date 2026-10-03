@@ -22,6 +22,12 @@ from config import (
     TARGET_PACKAGE,
     I_GOU_TAB_TEXTS,
     I_GOU_TAB_RATIO,
+    LAUNCH_SETTLE_SECONDS,
+    I_GOU_PAGE_MARKERS,
+    I_GOU_MARKER_MIN_HITS,
+    I_GOU_CLICK_MAX,
+    I_GOU_CLICK_RETRY_INTERVAL,
+    ENTER_I_GOU_TIMEOUT,
     PRODUCT_KEYWORDS,
     SALE_TIME_REGEX,
     SECOND_CLICK_EXTRA_SECONDS,
@@ -97,6 +103,7 @@ class PurchaseFlow(object):
         self._stage_elapsed = 0.0
         self._scroll_count = 0
         self._attempts = 0
+        self._click_count = 0
         self._last_scroll = None
 
         self.status = u""
@@ -115,6 +122,7 @@ class PurchaseFlow(object):
         self._stage_elapsed = 0.0
         self._scroll_count = 0
         self._attempts = 0
+        self._click_count = 0
         self._last_scroll = None
 
         self.success = False
@@ -170,11 +178,19 @@ class PurchaseFlow(object):
                     self._finish(False, message)
                     return
         self._timer += dt
-        if self._timer >= 3.0:
+        if self._timer >= LAUNCH_SETTLE_SECONDS:
             self._set_state(ENTER_I_GOU, u"正在进入 i购…")
+            # 冷启动等待已结束，进入购阶段后立即点击一次
+            self._timer = I_GOU_CLICK_RETRY_INTERVAL
 
     def _update_enter_i_gou(self, dt):
-        """点击 i购 标签，直到商品列表出现或超时"""
+        """
+        点击 "购" 标签并确认进入购页面：
+        - 识别到购页面分类特征词（全部/经典/精品，至少命中两个）：
+          进入滑动查找，绝不再重复点击标签；
+        - 未确认：间隔重试点击，最多 I_GOU_CLICK_MAX 次；
+        - 总超时后仍进入查找阶段（滑动本身会暴露页面内容）。
+        """
         # 点击操作依赖无障碍；i茅台已启动，在此给出明确提示
         if self.launcher.is_android and not self.bridge.is_connected():
             self._finish(
@@ -183,29 +199,34 @@ class PurchaseFlow(object):
             )
             return
 
-        if self.bridge.node_contains_all(PRODUCT_KEYWORDS):
-            self._set_state(SEARCHING, u"已进入 i购，查找目标商品…")
+        # 购页面特征确认：分类标签同时出现多个才算数，
+        # 避免首页恰好出现单个特征词导致误判。
+        if self.bridge.count_texts(I_GOU_PAGE_MARKERS) \
+                >= I_GOU_MARKER_MIN_HITS:
+            self._set_state(SEARCHING, u"已确认进入 i购，查找目标商品…")
             return
 
         self._stage_elapsed += dt
-        if self._stage_elapsed >= 8.0:
+        if self._stage_elapsed >= ENTER_I_GOU_TIMEOUT:
             self._set_state(SEARCHING, u"正在 i购中查找目标商品…")
             return
 
         self._timer += dt
-        if self._timer >= 1.5:
-            print("正在访问i购")
-            clicked = False
-            for tab_text in I_GOU_TAB_TEXTS:
-                if self.bridge.click_text(tab_text):
-                    clicked = True
-                    break
-            if not clicked:
-                # 标签为自绘控件、按文字点不中：拟人化坐标点击
-                self.bridge.tap_ratio_human(
-                    I_GOU_TAB_RATIO[0], I_GOU_TAB_RATIO[1],
-                    TAP_JITTER_RATIO,
-                )
+        if self._timer >= I_GOU_CLICK_RETRY_INTERVAL:
+            if self._click_count < I_GOU_CLICK_MAX:
+                print("正在访问i购")
+                clicked = False
+                for tab_text in I_GOU_TAB_TEXTS:
+                    if self.bridge.click_text(tab_text):
+                        clicked = True
+                        break
+                if not clicked:
+                    # 标签为自绘控件、按文字点不中：拟人化坐标点击
+                    self.bridge.tap_ratio_human(
+                        I_GOU_TAB_RATIO[0], I_GOU_TAB_RATIO[1],
+                        TAP_JITTER_RATIO,
+                    )
+                self._click_count += 1
             self._timer = 0.0
 
     def _update_searching(self, dt, now):
@@ -354,6 +375,7 @@ class PurchaseFlow(object):
         self._stage_elapsed = 0.0
         self._last_scroll = None
         self._attempts = 0
+        self._click_count = 0
         if status is not None:
             self.status = status
 

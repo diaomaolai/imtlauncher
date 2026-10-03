@@ -111,6 +111,24 @@ public class MtA11yService extends AccessibilityService {
     }
 
     /**
+     * 统计给定文字中有多少个能在当前页面找到（去重计数）。
+     * 用于确认购页面：顶部 "全部/经典/精品" 等分类标签同时出现
+     * 多个，才判定确实进入了购页面。
+     */
+    public int countDistinctTexts(String[] texts) {
+        if (texts == null) {
+            return 0;
+        }
+        int count = 0;
+        for (String text : texts) {
+            if (text != null && textExists(text)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
      * 扫描全部控件文字，返回匹配正则的内容，按控件在屏幕上的位置
      * 由下往上排序（右下角的开售时间优先），自动去重。
      */
