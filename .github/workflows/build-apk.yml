@@ -94,6 +94,16 @@ jobs:
           test "$ok" -eq 1
           test -d "$SDK_ROOT/platforms/android-33"
 
+      - name: Cache Android debug keystore (stable signature for -r updates)
+        uses: actions/cache@v4
+        with:
+          # GitHub 每次运行都是全新 runner，Gradle 会生成全新调试签名，
+          # 导致不同 CI 版本签名不一致、无法 adb install -r（每次都要
+          # 卸载，而卸载会重置无障碍授权）。缓存固定 debug.keystore，
+          # 首次运行生成、之后所有运行复用同一签名。
+          path: ~/.android/debug.keystore
+          key: android-debug-keystore-v1
+
       - name: Build debug APK
         run: buildozer -v android debug
 

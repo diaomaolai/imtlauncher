@@ -5,7 +5,7 @@
 
 # APP 基本信息
 APP_TITLE = u"i茅台启动器"
-APP_VERSION = "0.3.3"
+APP_VERSION = "0.3.4"
 
 # i茅台 安卓包名（官方包名，应用宝等各渠道一致）
 TARGET_PACKAGE = "com.moutai.mall"
