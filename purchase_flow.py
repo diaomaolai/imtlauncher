@@ -23,6 +23,9 @@ from config import (
     I_GOU_TAB_TEXTS,
     I_GOU_TAB_RATIO,
     LAUNCH_SETTLE_SECONDS,
+    HOME_READY_MARKERS,
+    HOME_MARKER_MIN_HITS,
+    HOME_READY_TIMEOUT,
     I_GOU_PAGE_MARKERS,
     I_GOU_MARKER_MIN_HITS,
     I_GOU_CLICK_MAX,
@@ -179,17 +182,20 @@ class PurchaseFlow(object):
                     return
         self._timer += dt
         if self._timer >= LAUNCH_SETTLE_SECONDS:
-            self._set_state(ENTER_I_GOU, u"正在进入 i购…")
-            # 冷启动等待已结束，进入购阶段后立即点击一次
-            self._timer = I_GOU_CLICK_RETRY_INTERVAL
+            self._set_state(ENTER_I_GOU, u"等待 i茅台首页加载…")
 
     def _update_enter_i_gou(self, dt):
         """
-        点击 "购" 标签并确认进入购页面：
-        - 识别到购页面分类特征词（全部/经典/精品，至少命中两个）：
-          进入滑动查找，绝不再重复点击标签；
-        - 未确认：间隔重试点击，最多 I_GOU_CLICK_MAX 次；
-        - 总超时后仍进入查找阶段（滑动本身会暴露页面内容）。
+        等待首页加载完成 → 点击 "购" 标签 → 确认进入购页面。
+
+        关键保护：
+        - i茅台冷启动（开屏广告/加固解压）实测需 10~15 秒，期间
+          任何点击都会落在开屏页上（即"乱点"），因此只有识别到
+          首页可见特征（我的i茅台/小茅运）才允许点击；
+        - 点击后首页特征消失（购页面加载中），绝不重复点击；
+          若仍停留在首页（首次没点中），间隔后补点，最多 3 次；
+        - 购页面以可见的 "全部/经典/精品" 分类词确认，命中后
+          进入滑动查找。
         """
         # 点击操作依赖无障碍；i茅台已启动，在此给出明确提示
         if self.launcher.is_android and not self.bridge.is_connected():
@@ -199,21 +205,31 @@ class PurchaseFlow(object):
             )
             return
 
-        # 购页面特征确认：分类标签同时出现多个才算数，
-        # 避免首页恰好出现单个特征词导致误判。
-        if self.bridge.count_texts(I_GOU_PAGE_MARKERS) \
+        # 购页面特征确认（可见控件，至少命中两个）
+        if self.bridge.count_visible_texts(I_GOU_PAGE_MARKERS) \
                 >= I_GOU_MARKER_MIN_HITS:
             self._set_state(SEARCHING, u"已确认进入 i购，查找目标商品…")
             return
 
         self._stage_elapsed += dt
+
+        # 首页始终未加载出来：明确失败，不在未知页面上点击
+        if self._stage_elapsed >= HOME_READY_TIMEOUT \
+                and self._click_count == 0:
+            self._finish(False, u"i茅台首页加载超时，流程中止")
+            return
+
         if self._stage_elapsed >= ENTER_I_GOU_TIMEOUT:
             self._set_state(SEARCHING, u"正在 i购中查找目标商品…")
             return
 
+        # 仅当首页确实加载完成才点击；开屏页/购页面加载中均不点击
+        home_ready = self.bridge.count_visible_texts(HOME_READY_MARKERS) \
+            >= HOME_MARKER_MIN_HITS
+
         self._timer += dt
         if self._timer >= I_GOU_CLICK_RETRY_INTERVAL:
-            if self._click_count < I_GOU_CLICK_MAX:
+            if home_ready and self._click_count < I_GOU_CLICK_MAX:
                 print("正在访问i购")
                 clicked = False
                 for tab_text in I_GOU_TAB_TEXTS:
@@ -227,6 +243,9 @@ class PurchaseFlow(object):
                         TAP_JITTER_RATIO,
                     )
                 self._click_count += 1
+                self.status = u"已点击购标签，等待购页面加载…"
+            elif not home_ready and self._click_count == 0:
+                self.status = u"等待 i茅台首页加载…"
             self._timer = 0.0
 
     def _update_searching(self, dt, now):

@@ -129,6 +129,38 @@ public class MtA11yService extends AccessibilityService {
     }
 
     /**
+     * 页面上是否存在"可见的"包含指定文字的控件：
+     * 除文字匹配外，还要求控件在屏幕上有真实尺寸（宽高 > 1）。
+     * i茅台底部标签的文字节点是 bounds=[0,0][0,0] 的不可见节点，
+     * 不能用普通 textExists 判断页面是否真的渲染完成。
+     */
+    public boolean textExistsVisible(String text) {
+        for (AccessibilityNodeInfo root : roots()) {
+            List<AccessibilityNodeInfo> hits = new ArrayList<>();
+            findVisibleByText(root, text, null, hits);
+            recycle(root);
+            if (!hits.isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 统计给定文字中有多少个以"可见控件"形式存在（去重计数） */
+    public int countDistinctVisibleTexts(String[] texts) {
+        if (texts == null) {
+            return 0;
+        }
+        int count = 0;
+        for (String text : texts) {
+            if (text != null && textExistsVisible(text)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
      * 扫描全部控件文字，返回匹配正则的内容，按控件在屏幕上的位置
      * 由下往上排序（右下角的开售时间优先），自动去重。
      */
@@ -374,6 +406,25 @@ public class MtA11yService extends AccessibilityService {
         }
     }
 
+    /** 同 findByText，但额外要求控件有真实可见尺寸（排除 0x0 节点） */
+    private void findVisibleByText(AccessibilityNodeInfo node, String needle,
+                                   Rect region,
+                                   List<AccessibilityNodeInfo> out) {
+        if (node == null || out.size() >= 5) {
+            return;
+        }
+        if ((containsSeq(node.getText(), needle)
+                || containsSeq(node.getContentDescription(), needle))
+                && hasRealBounds(node)
+                && (region == null || centerInRegion(node, region))) {
+            out.add(node);
+        }
+        int vcount = node.getChildCount();
+        for (int i = 0; i < vcount; i++) {
+            findVisibleByText(node.getChild(i), needle, region, out);
+        }
+    }
+
     private AccessibilityNodeInfo findByAllParts(AccessibilityNodeInfo node,
                                                  String[] parts) {
         if (node == null) {
@@ -555,6 +606,13 @@ public class MtA11yService extends AccessibilityService {
                 (int) (m.heightPixels * minYRatio),
                 (int) (m.widthPixels * maxXRatio),
                 (int) (m.heightPixels * maxYRatio));
+    }
+
+    /** 控件是否在屏幕上有真实可见尺寸（排除 bounds 0x0 的占位节点） */
+    private static boolean hasRealBounds(AccessibilityNodeInfo node) {
+        Rect rect = new Rect();
+        node.getBoundsInScreen(rect);
+        return rect.width() > 1 && rect.height() > 1;
     }
 
     /** 控件中心点是否落在区域内 */

@@ -87,6 +87,16 @@ class A11yBridge(object):
         except Exception:
             return 0
 
+    def count_visible_texts(self, texts):
+        """统计给定文字中有多少个以可见控件形式存在（排除0x0占位节点）"""
+        service = self._service_or_none()
+        if service is None:
+            return 0
+        try:
+            return int(service.countDistinctVisibleTexts(list(texts)))
+        except Exception:
+            return 0
+
     def click_text(self, text, region=None):
         """
         按文字查找并点击，成功返回 True。
