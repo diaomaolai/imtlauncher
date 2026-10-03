@@ -20,7 +20,6 @@ from datetime import timedelta
 
 from config import (
     TARGET_PACKAGE,
-    I_GOU_TAB_TEXTS,
     I_GOU_TAB_RATIO,
     LAUNCH_SETTLE_SECONDS,
     HOME_READY_MARKERS,
@@ -231,19 +230,14 @@ class PurchaseFlow(object):
         if self._timer >= I_GOU_CLICK_RETRY_INTERVAL:
             if home_ready and self._click_count < I_GOU_CLICK_MAX:
                 print("正在访问i购")
-                clicked = False
-                for tab_text in I_GOU_TAB_TEXTS:
-                    if self.bridge.click_text(tab_text):
-                        clicked = True
-                        break
-                if not clicked:
-                    # 标签为自绘控件、按文字点不中：拟人化坐标点击
-                    self.bridge.tap_ratio_human(
-                        I_GOU_TAB_RATIO[0], I_GOU_TAB_RATIO[1],
-                        TAP_JITTER_RATIO,
-                    )
+                # 一律按实测坐标点击右下角 i购入口；
+                # 不做文字点击，避免命中底部标签栏的"购"标签。
+                self.bridge.tap_ratio_human(
+                    I_GOU_TAB_RATIO[0], I_GOU_TAB_RATIO[1],
+                    TAP_JITTER_RATIO,
+                )
                 self._click_count += 1
-                self.status = u"已点击购标签，等待购页面加载…"
+                self.status = u"已点击i购入口，等待购页面加载…"
             elif not home_ready and self._click_count == 0:
                 self.status = u"等待 i茅台首页加载…"
             self._timer = 0.0
