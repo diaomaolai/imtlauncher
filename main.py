@@ -15,6 +15,10 @@ i茅台启动器 - 主入口
 from kivy.app import App
 from kivy.clock import Clock
 
+import threading
+import time
+from datetime import datetime
+
 from config import APP_TITLE
 from font_setup import register_cjk_font
 from android_launcher import AndroidLauncher
@@ -23,8 +27,52 @@ from purchase_flow import PurchaseFlow
 from scheduler import LaunchScheduler, parse_target_time, format_remaining
 from app_ui import MainScreen
 
-# 主循环间隔（秒）。越小触发越准时
+# 主循环间隔（秒）。越小触发越准
 TICK_INTERVAL = 0.3
+
+
+class FlowWorker(threading.Thread):
+    """
+    自动申购流程工作线程。
+
+    关键：启动 i茅台后我们的 Activity 会进入后台，Kivy/SDL 主循环
+    （Clock）被系统暂停；若状态机跑在 Clock 里，到点后的点击、滑动
+    全部不会执行。普通 Python 线程不受 Activity 前后台影响，因此
+    由本线程以固定间隔推进状态机。
+    """
+
+    def __init__(self, purchase_flow):
+        super(FlowWorker, self).__init__(daemon=True)
+        self.purchase_flow = purchase_flow
+        self.stop_event = threading.Event()
+
+    def stop(self):
+        """请求线程退出（取消定时时调用）"""
+        self.stop_event.set()
+
+    def run(self):
+        last = time.monotonic()
+        while not self.stop_event.is_set() \
+                and not self.purchase_flow.is_done:
+            current = time.monotonic()
+            dt = current - last
+            last = current
+            now_dt = datetime.now()
+            try:
+                self.purchase_flow.update(dt, now_dt)
+            except Exception as exc:
+                # 单次异常不杀线程，打印后下一轮继续
+                print(u"流程推进异常: %s" % exc)
+
+            # pyjnius 在本线程上附着的 JNI 环境主动释放，
+            # 下一轮调用会重新附着，避免持有过期环境。
+            try:
+                from jnius import detach
+                detach()
+            except Exception:
+                pass
+
+            self.stop_event.wait(TICK_INTERVAL)
 
 
 class IMtLauncherApp(App):
@@ -38,6 +86,7 @@ class IMtLauncherApp(App):
         self.bridge = A11yBridge()
         self.purchase_flow = PurchaseFlow(self.launcher, self.bridge)
         self.scheduler = LaunchScheduler()
+        self.flow_worker = None
 
         # 界面
         self.screen = MainScreen()
@@ -46,7 +95,7 @@ class IMtLauncherApp(App):
         # 启动后打印一次屏幕参数，确认自适应取到的尺寸
         Clock.schedule_once(self._print_screen_metrics, 0.5)
 
-        # 主循环：倒计时 + 自动化流程推进
+        # 界面刷新循环（只更新界面；流程推进在工作线程）
         Clock.schedule_interval(self._tick, TICK_INTERVAL)
         return self.screen
 
@@ -74,6 +123,11 @@ class IMtLauncherApp(App):
 
         self.scheduler.arm(target)
         self.purchase_flow.reset(target)
+
+        # 启动后台工作线程推进流程（Activity 进后台也不中断）
+        self.flow_worker = FlowWorker(self.purchase_flow)
+        self.flow_worker.start()
+
         self.screen.set_schedule_button_armed(True)
         self.screen.set_status(
             u"已设定：%s 启动 i茅台"
@@ -82,18 +136,20 @@ class IMtLauncherApp(App):
 
     def _disarm(self, status_text=None):
         """取消定时并恢复界面"""
+        if self.flow_worker is not None:
+            self.flow_worker.stop()
+            self.flow_worker = None
         self.scheduler.cancel()
         self.screen.set_schedule_button_armed(False)
         self.screen.set_countdown(u"倒计时：未设定")
         if status_text:
             self.screen.set_status(status_text)
 
-    # ---------------- 主循环 ----------------
+    # ---------------- 界面刷新 ----------------
     def _tick(self, dt):
         if not self.scheduler.is_armed:
             return
 
-        from datetime import datetime
         now_dt = datetime.now()
 
         # 倒计时跟随流程目标：启动时刻；侦察到开售时间后切换为二次点击时刻
@@ -104,8 +160,7 @@ class IMtLauncherApp(App):
                 u"倒计时：%s" % format_remaining(remaining)
             )
 
-        # 推进自动申购状态机
-        self.purchase_flow.update(dt, now_dt)
+        # 状态文字由工作线程更新，这里只负责显示
         self.screen.set_status(self.purchase_flow.status)
 
         if self.purchase_flow.is_done:
