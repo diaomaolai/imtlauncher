@@ -247,6 +247,73 @@ public class MtA11yService extends AccessibilityService {
         return false;
     }
 
+    /**
+     * 返回文字同时包含全部关键字的控件的屏幕中心绝对坐标，
+     * 结果为 int[]{x, y}；找不到返回 null。
+     * 用于点击商品时记录点击位置，供返回列表后二次点击。
+     */
+    public int[] nodeCenterByAllParts(String[] parts) {
+        for (AccessibilityNodeInfo root : roots()) {
+            AccessibilityNodeInfo hit = findByAllParts(root, parts);
+            if (hit != null) {
+                Rect rect = new Rect();
+                hit.getBoundsInScreen(rect);
+                int[] center = new int[]{rect.centerX(), rect.centerY()};
+                recycle(root);
+                return center;
+            }
+            recycle(root);
+        }
+        return null;
+    }
+
+    /**
+     * 只在指定绝对像素区域内扫描匹配正则的控件文字
+     * （区域直接填像素，不做比例换算）。
+     */
+    public String[] findRegexTextsInPxRegion(String regex, int minX, int minY,
+                                             int maxX, int maxY) {
+        Pattern pattern;
+        try {
+            pattern = Pattern.compile(regex);
+        } catch (Exception e) {
+            return new String[0];
+        }
+        Rect region = new Rect(minX, minY, maxX, maxY);
+        Map<String, Integer> bottomByText = new HashMap<>();
+        for (AccessibilityNodeInfo root : roots()) {
+            collectRegex(root, pattern, region, bottomByText);
+            recycle(root);
+        }
+        return orderByBottom(bottomByText);
+    }
+
+    /**
+     * 按绝对屏幕像素点击（坐标直接填值，不做比例换算）。
+     * 落点在 jitterPx 像素内小幅随机、按压时长随机、轻微位移。
+     */
+    public boolean tapPxHuman(int x, int y, int jitterPx) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            return false;
+        }
+        DisplayMetrics m = realMetrics();
+        float fx = clamp(
+                x + (mRandom.nextFloat() * 2f - 1f) * jitterPx,
+                0, m.widthPixels - 1);
+        float fy = clamp(
+                y + (mRandom.nextFloat() * 2f - 1f) * jitterPx,
+                0, m.heightPixels - 1);
+
+        Path path = new Path();
+        path.moveTo(fx, fy);
+        float driftX = (mRandom.nextFloat() * 2f - 1f) * 5f;
+        float driftY = (mRandom.nextFloat() * 2f - 1f) * 5f;
+        path.lineTo(fx + driftX, fy + driftY);
+
+        long holdMs = 60L + mRandom.nextInt(81); // 60~140ms
+        return dispatchPath(path, holdMs);
+    }
+
     /** 对第一个可滚动控件执行一次"前滚"（列表向下/内容上移） */
     public boolean scrollForwardOnce() {
         for (AccessibilityNodeInfo root : roots()) {
