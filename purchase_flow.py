@@ -30,6 +30,7 @@ from config import (
     I_GOU_CLICK_MAX,
     I_GOU_CLICK_RETRY_INTERVAL,
     ENTER_I_GOU_TIMEOUT,
+    DIAG_PRINT_INTERVAL,
     PRODUCT_KEYWORDS,
     SALE_TIME_REGEX,
     SECOND_CLICK_EXTRA_SECONDS,
@@ -103,6 +104,7 @@ class PurchaseFlow(object):
         # 计时器与计数
         self._timer = 0.0
         self._stage_elapsed = 0.0
+        self._diag_timer = 0.0
         self._scroll_count = 0
         self._attempts = 0
         self._click_count = 0
@@ -122,6 +124,7 @@ class PurchaseFlow(object):
         self.state = IDLE
         self._timer = 0.0
         self._stage_elapsed = 0.0
+        self._diag_timer = 0.0
         self._scroll_count = 0
         self._attempts = 0
         self._click_count = 0
@@ -185,16 +188,13 @@ class PurchaseFlow(object):
 
     def _update_enter_i_gou(self, dt):
         """
-        等待首页加载完成 → 点击 "购" 标签 → 确认进入购页面。
+        等待首页加载 → 点击 i购（全程仅 1 次）→ 确认进入购页面。
 
-        关键保护：
-        - i茅台冷启动（开屏广告/加固解压）实测需 10~15 秒，期间
-          任何点击都会落在开屏页上（即"乱点"），因此只有识别到
-          首页可见特征（我的i茅台/小茅运）才允许点击；
-        - 点击后首页特征消失（购页面加载中），绝不重复点击；
-          若仍停留在首页（首次没点中），间隔后补点，最多 3 次；
-        - 购页面以可见的 "全部/经典/精品" 分类词确认，命中后
-          进入滑动查找。
+        铁律：
+        - 只在识别到首页可见特征时点击（开屏广告/冷启动期间零点击）；
+        - 全程最多点击 1 次，点完后无论结果如何都不再点击；
+        - 购页面以可见的 "全部/经典/精品" 确认，确认后进入滑动；
+        - 超时未确认则失败中止，绝不做任何兜底点击。
         """
         # 点击操作依赖无障碍；i茅台已启动，在此给出明确提示
         if self.launcher.is_android and not self.bridge.is_connected():
@@ -204,43 +204,50 @@ class PurchaseFlow(object):
             )
             return
 
-        # 购页面特征确认（可见控件，至少命中两个）
-        if self.bridge.count_visible_texts(I_GOU_PAGE_MARKERS) \
-                >= I_GOU_MARKER_MIN_HITS:
+        self._stage_elapsed += dt
+
+        # 每轮读取两类特征计数
+        gou_hits = self.bridge.count_visible_texts(I_GOU_PAGE_MARKERS)
+        home_hits = self.bridge.count_visible_texts(HOME_READY_MARKERS)
+        home_ready = home_hits >= HOME_MARKER_MIN_HITS
+
+        # 诊断心跳：日志中始终能看到当前页面识别情况
+        self._diag_timer += dt
+        if self._diag_timer >= DIAG_PRINT_INTERVAL:
+            print(
+                u"购阶段诊断: 首页特征=%d 购页特征=%d 已点击=%d 等待=%.0fs"
+                % (home_hits, gou_hits, self._click_count,
+                   self._stage_elapsed)
+            )
+            self._diag_timer = 0.0
+
+        # 购页面确认成功 → 进入滑动
+        if gou_hits >= I_GOU_MARKER_MIN_HITS:
             self._set_state(SEARCHING, u"已确认进入 i购，查找目标商品…")
             return
 
-        self._stage_elapsed += dt
+        # 唯一一次点击：首页就绪且尚未点击时执行
+        if self._click_count == 0 and home_ready:
+            print("正在访问i购")
+            self.bridge.tap_ratio_human(
+                I_GOU_TAB_RATIO[0], I_GOU_TAB_RATIO[1],
+                TAP_JITTER_RATIO,
+            )
+            self._click_count += 1
+            self.status = u"已点击i购，等待购页面确认（不会再次点击）…"
+        elif self._click_count == 0:
+            self.status = u"等待 i茅台首页加载…"
 
-        # 首页始终未加载出来：明确失败，不在未知页面上点击
-        if self._stage_elapsed >= HOME_READY_TIMEOUT \
-                and self._click_count == 0:
-            self._finish(False, u"i茅台首页加载超时，流程中止")
-            return
-
+        # 超时：未点击→首页加载超时；已点击→未确认购页面。
+        # 一律失败中止，绝不在未知页面兜底点击。
         if self._stage_elapsed >= ENTER_I_GOU_TIMEOUT:
-            self._set_state(SEARCHING, u"正在 i购中查找目标商品…")
-            return
-
-        # 仅当首页确实加载完成才点击；开屏页/购页面加载中均不点击
-        home_ready = self.bridge.count_visible_texts(HOME_READY_MARKERS) \
-            >= HOME_MARKER_MIN_HITS
-
-        self._timer += dt
-        if self._timer >= I_GOU_CLICK_RETRY_INTERVAL:
-            if home_ready and self._click_count < I_GOU_CLICK_MAX:
-                print("正在访问i购")
-                # 一律按实测坐标点击右下角 i购入口；
-                # 不做文字点击，避免命中底部标签栏的"购"标签。
-                self.bridge.tap_ratio_human(
-                    I_GOU_TAB_RATIO[0], I_GOU_TAB_RATIO[1],
-                    TAP_JITTER_RATIO,
+            if self._click_count == 0:
+                self._finish(False, u"i茅台首页加载超时，未执行点击，流程中止")
+            else:
+                self._finish(
+                    False,
+                    u"已点击i购但未确认购页面，为避免误触已中止，可重新定时",
                 )
-                self._click_count += 1
-                self.status = u"已点击i购入口，等待购页面加载…"
-            elif not home_ready and self._click_count == 0:
-                self.status = u"等待 i茅台首页加载…"
-            self._timer = 0.0
 
     def _update_searching(self, dt, now):
         """周期性上滑，直到找到目标商品"""
@@ -386,6 +393,7 @@ class PurchaseFlow(object):
         self.state = state
         self._timer = 0.0
         self._stage_elapsed = 0.0
+        self._diag_timer = 0.0
         self._last_scroll = None
         self._attempts = 0
         self._click_count = 0
