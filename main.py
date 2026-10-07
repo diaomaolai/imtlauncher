@@ -23,6 +23,7 @@ from font_setup import register_cjk_font
 from a11y_bridge import A11yBridge
 from flow_core import FlowCore
 from scheduler import parse_target_time, format_remaining
+from app_logger import AppLogger
 from app_ui import MainScreen
 
 
@@ -35,9 +36,10 @@ class FlowWorker(threading.Thread):
     线程以固定间隔推进状态机。
     """
 
-    def __init__(self, flow):
+    def __init__(self, flow, logger=None):
         super(FlowWorker, self).__init__(daemon=True)
         self.flow = flow
+        self.logger = logger
         self.stop_event = threading.Event()
 
     def stop(self):
@@ -54,8 +56,11 @@ class FlowWorker(threading.Thread):
             try:
                 self.flow.update(dt, now_dt)
             except Exception as exc:
-                # 单次异常不杀线程，打印后下一轮继续
-                print(u"流程推进异常: %s" % exc)
+                # 单次异常不杀线程，记录后下一轮继续
+                if self.logger is not None:
+                    self.logger.log(u"流程推进异常: %s" % exc)
+                else:
+                    print(u"流程推进异常: %s" % exc)
 
             # 主动释放本线程上附着的 JNI 环境
             try:
@@ -74,8 +79,9 @@ class IMtAssistantApp(App):
         self.title = APP_TITLE
 
         # 功能模块
+        self.app_logger = AppLogger()
         self.bridge = A11yBridge()
-        self.flow = FlowCore(self.bridge)
+        self.flow = FlowCore(self.bridge, self.app_logger)
         self.flow_worker = None
 
         # 界面
@@ -102,7 +108,7 @@ class IMtAssistantApp(App):
         self.flow.reset(target)
 
         # 启动后台工作线程推进流程（Activity 进后台也不中断）
-        self.flow_worker = FlowWorker(self.flow)
+        self.flow_worker = FlowWorker(self.flow, self.app_logger)
         self.flow_worker.start()
 
         self.screen.set_schedule_button_armed(True)
@@ -120,11 +126,26 @@ class IMtAssistantApp(App):
         if status_text:
             self.screen.set_status(status_text)
 
+    def _close_android_activity(self):
+        """结束启动器 APP（已售罄分支）；电脑端不执行"""
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass(u"org.kivy.android.PythonActivity")
+            activity = PythonActivity.mActivity
+            if activity is not None:
+                activity.finish()
+        except Exception:
+            pass
+
     # ---------------- 界面刷新 ----------------
     def _tick(self, dt):
         if self.flow.is_done:
+            should_exit = self.flow.request_app_exit
             self.screen.set_status(self.flow.status)
             self._disarm(self.flow.status)
+            if should_exit:
+                # 已售罄：返回列表后结束启动器 APP
+                self._close_android_activity()
             return
         if self.flow_worker is None:
             return

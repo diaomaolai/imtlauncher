@@ -79,6 +79,16 @@ class A11yBridge(object):
             return None
 
     # ---------------- 节点点击 ----------------
+    def text_exists(self, text):
+        """页面上是否存在包含该文字的控件（只判断、不点击）"""
+        service = self._service_or_none()
+        if service is None:
+            return False
+        try:
+            return bool(service.textExists(text))
+        except Exception:
+            return False
+
     def click_node_by_parts(self, keywords):
         """点击文字同时包含全部关键字的控件节点，成功返回 True"""
         service = self._service_or_none()
