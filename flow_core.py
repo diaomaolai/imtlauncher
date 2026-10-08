@@ -32,6 +32,7 @@ from config import (
     SOLD_OUT_TEXTS,
     SALE_TIME_REGEX,
     RE_SCOUT_INTERVAL,
+    STABLE_READ_COUNT,
     WAIT_HEARTBEAT,
     TAP_JITTER_PX,
 )
@@ -83,6 +84,8 @@ class FlowCore(object):
         self.request_app_exit = False
         self._elapsed = 0.0
         self._heartbeat = 0.0
+        self._last_time_hit = None
+        self._stable_count = 0
         self._log(
             u"已设置定时，首次触发时刻 %s"
             % first_target.strftime(u"%Y-%m-%d %H:%M:%S")
@@ -119,6 +122,8 @@ class FlowCore(object):
         self.status = status
         self._elapsed = elapsed
         self._heartbeat = 0.0
+        self._last_time_hit = None
+        self._stable_count = 0
 
     def _heartbeat_log(self, dt, message):
         """等待期间按 WAIT_HEARTBEAT 周期记录心跳"""
@@ -194,6 +199,16 @@ class FlowCore(object):
         )
         if hits:
             hhmm = hits[0]
+            # 动态稳定判断：不设固定等待，连续 N 次读数一致即采信；
+            # 期间数值一旦变化立即重新计数
+            if hhmm == self._last_time_hit:
+                self._stable_count += 1
+            else:
+                self._last_time_hit = hhmm
+                self._stable_count = 1
+            if self._stable_count < STABLE_READ_COUNT:
+                self.status = u"等待详情页时间稳定…"
+                return
             try:
                 hour, minute = (int(v) for v in hhmm.split(u":"))
             except ValueError:
