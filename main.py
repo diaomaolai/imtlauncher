@@ -25,6 +25,7 @@ from flow_core import FlowCore
 from scheduler import parse_target_time, format_remaining
 from app_logger import AppLogger
 from app_ui import MainScreen
+from status_reporter import StatusStore, send_report
 
 
 class FlowWorker(threading.Thread):
@@ -83,10 +84,18 @@ class IMtAssistantApp(App):
         self.bridge = A11yBridge()
         self.flow = FlowCore(self.bridge, self.app_logger)
         self.flow_worker = None
+        self.status_store = StatusStore()
 
         # 界面
         self.screen = MainScreen()
         self.screen.schedule_btn.bind(on_press=self._on_schedule_pressed)
+
+        # 打开 APP 即上报上一场状态（机器码;状态码;日期时间;定时时间）
+        send_report(
+            self.screen.get_device_code(),
+            self.status_store,
+            self.app_logger,
+        )
 
         # 界面刷新循环（只更新界面；流程推进在工作线程）
         Clock.schedule_interval(self._tick, TICK_INTERVAL)
@@ -106,6 +115,15 @@ class IMtAssistantApp(App):
             return
 
         self.flow.reset(target)
+
+        # 新一场开始：上报状态清零；弹窗出现时由回调置 1
+        self.status_store.mark_start(self.screen.get_time_text())
+        self.flow.on_popup_success = self.status_store.mark_success
+
+        # 记录本次设备标识（SN + Android ID，取自界面文本框）
+        self.app_logger.log(
+            u"设备标识：%s" % self.screen.get_device_code()
+        )
 
         # 启动后台工作线程推进流程（Activity 进后台也不中断）
         self.flow_worker = FlowWorker(self.flow, self.app_logger)

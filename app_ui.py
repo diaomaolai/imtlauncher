@@ -16,6 +16,7 @@ from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
 
 from config import APP_TITLE, DEFAULT_TIME_TEXT
+from device_info import get_device_code
 
 
 class MainScreen(BoxLayout):
@@ -61,7 +62,25 @@ class MainScreen(BoxLayout):
         self.add_widget(self.status_label)
 
         # 弹簧
-        self.add_widget(Widget(size_hint=(1, 0.08)))
+        self.add_widget(Widget(size_hint=(1, 0.04)))
+
+        # ---- 设备标识区域（SN + Android ID，启动时自动获取，可编辑）----
+        self.device_caption = Label(
+            text=u"本机序列号 + Android ID（可手动补全）",
+            font_size="15sp",
+            color=(0.35, 0.35, 0.35, 1),
+            size_hint=(1, 0.05),
+        )
+        self.add_widget(self.device_caption)
+
+        self.device_input = TextInput(
+            text=get_device_code(),
+            font_size="16sp",
+            halign="center",
+            multiline=False,
+            size_hint=(1, 0.07),
+        )
+        self.add_widget(self.device_input)
 
         # ---- 定时区域 ----
         self.time_caption = Label(
@@ -101,11 +120,16 @@ class MainScreen(BoxLayout):
         self.add_widget(self.countdown_label)
 
         # 弹簧
-        self.add_widget(Widget(size_hint=(1, 0.12)))
+        self.add_widget(Widget(size_hint=(1, 0.10)))
 
     def _redraw_background(self, *args):
         self._background.pos = self.pos
         self._background.size = self.size
+
+    # ---- 设备标识 ----
+    def get_device_code(self):
+        """获取设备标识文本框内容（SN + Android ID）"""
+        return self.device_input.text.strip()
 
     # ---- 定时相关 ----
     def get_time_text(self):

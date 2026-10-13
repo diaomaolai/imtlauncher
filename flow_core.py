@@ -1,24 +1,35 @@
 # -*- coding: utf-8 -*-
 """
-核心流程模块（v1.2.0：循环作战版）
+核心流程模块（循环作战版）
+
+前提：手动打开 i茅台并停在 i购商品列表页（能看到飞天商品）。
 
 总原则：
-- 已售罄：返回列表 → 结束启动器（唯一正常结束）；
-- 详情页 10 秒什么都没识别到：返回列表 → 中止；
-- 其余所有情况（立即抢购 / 未来时间 / 已过时间 / 弹窗）一律循环，
-  一场接一场，不主动结束。
+- 已售罄：需二次确认（返回列表重新进入仍为售罄）才结束启动器，
+  这是唯一正常结束；
+- 其余所有情况（立即抢购 / 未来时间 / 已过时间 / 弹窗 / 无响应）
+  一律循环，一场接一场，不主动结束。
+
+列表确认（防误判）：
+  必须同时看到「飞天」+「%vol」商品节点和列表独有标签
+  （全部/经典/精品）才认定在列表；详情页标题也含"飞天"，
+  靠标签排除，防止误点标题导致连点。
 
 循环逻辑：
-1. 列表识别「飞天」+「%vol」→ 点击文字节点（记录位置）→ 进详情；
-2. 详情页：
-   - 立即抢购：1 秒内识别并点击 → 进入"战后等待"；
-   - 开售时间（未来）：返回列表，倒计时设为该整点（不加秒），
-     到点点击记录位置进入 → 立即抢购则点；
-   - 开售时间（已过）：返回列表，间隔后重新进入读取下一场，
-     直到读到未来时间或立即抢购；
-   - 已售罄：返回 → 结束；
-3. 点击购买后若出现弹窗：只等待、不点击任何按钮，轮询直到重新
-   识别到「飞天」+「%vol」，再进入读取下一场时间。
+1. 定时到点 → 列表双确认 → 点击飞天文字节点（记录位置）→ 进详情；
+2. 详情页（动态识别，无固定等待）：
+   - 立即抢购/立即购买：0.3 秒轮询，识别到立刻点（1 秒内完成）；
+   - 开售时间（按钮"HH:MM投放"，右下角区域）：连续 2 次读数一致
+     才采信；未来时间返回列表等整点（不加秒）；已过时间返回列表，
+     每 4 秒重新进入侦察下一场；
+   - 已售罄：首次返回列表重新进入复核，第二次仍售罄才结束；
+   - 未识别到：不中止、不返回，无限等待（应对弹窗/未刷新）；
+3. 点击购买后（按钮不会消失，只以弹窗出现为生效依据）：
+   - 0.3 秒内出现弹窗 → 点击生效，只等待，不点任何弹窗按钮；
+   - 0.3 秒内未出现弹窗 → 返回列表重进再点；
+   - 列表双确认回来后 → 重新进入读下一场；
+4. 整点等待：到点点击记录位置进入，交由详情页处理；
+5. 弹窗（含风控倒计时）：任何环节只等待，不点任何按钮。
 
 全程通过 AppLogger 打印并写入 txt 日志。
 """
@@ -29,6 +40,9 @@ from config import (
     PRODUCT_KEYWORDS,
     BUTTON_REGION_PX,
     BUY_NOW_TEXTS,
+    LIST_MARKER_TEXTS,
+    POPUP_MARKER_TEXTS,
+    BUY_VERIFY_SECONDS,
     SOLD_OUT_TEXTS,
     SALE_TIME_REGEX,
     RE_SCOUT_INTERVAL,
@@ -63,6 +77,12 @@ class FlowCore(object):
         self.request_app_exit = False
         self._elapsed = 0.0
         self._heartbeat = 0.0
+        self._last_time_hit = None
+        self._stable_count = 0
+        self._buy_verified = False
+        self._soldout_pending = False
+        # 弹窗确认成功回调（由 main 注入，用于状态上报置 1）
+        self.on_popup_success = None
 
     # ---------------- 日志 ----------------
     def _log(self, message):
@@ -86,6 +106,8 @@ class FlowCore(object):
         self._heartbeat = 0.0
         self._last_time_hit = None
         self._stable_count = 0
+        self._buy_verified = False
+        self._soldout_pending = False
         self._log(
             u"已设置定时，首次触发时刻 %s"
             % first_target.strftime(u"%Y-%m-%d %H:%M:%S")
@@ -124,6 +146,8 @@ class FlowCore(object):
         self._heartbeat = 0.0
         self._last_time_hit = None
         self._stable_count = 0
+        self._buy_verified = False
+        # 注意：_soldout_pending 不在此重置，售罄复核要跨 ENTER→READ 保留
 
     def _heartbeat_log(self, dt, message):
         """等待期间按 WAIT_HEARTBEAT 周期记录心跳"""
@@ -131,6 +155,28 @@ class FlowCore(object):
         if self._heartbeat >= WAIT_HEARTBEAT:
             self._log(message)
             self._heartbeat = 0.0
+
+    def _list_ready(self):
+        """
+        确认当前确实在商品列表页：
+        既有「飞天」+「%vol」商品节点，又有列表独有标签
+        （全部/经典/精品）。返回商品节点中心，否则 None。
+        详情页标题也含"飞天"，靠标签排除误判。
+        """
+        center = self.bridge.node_center(PRODUCT_KEYWORDS)
+        if center is None:
+            return None
+        for marker in LIST_MARKER_TEXTS:
+            if self.bridge.text_exists(marker):
+                return center
+        return None
+
+    def _popup_visible(self):
+        """点击购买后是否出现弹窗（任一弹窗特征文字存在即视为出现）"""
+        for marker in POPUP_MARKER_TEXTS:
+            if self.bridge.text_exists(marker):
+                return True
+        return False
 
     # ---------------- IDLE ----------------
     def _update_idle(self, now):
@@ -140,7 +186,7 @@ class FlowCore(object):
 
     # ---------------- ENTER_PRODUCT ----------------
     def _update_enter_product(self, dt, now):
-        """列表查找商品：找到即记录位置并点击进入（弹窗期无限等待）"""
+        """列表查找商品：商品节点+列表标签双确认才进入（弹窗期无限等待）"""
         if not self.bridge.is_connected():
             self._finish(
                 False,
@@ -148,22 +194,22 @@ class FlowCore(object):
             )
             return
 
-        center = self.bridge.node_center(PRODUCT_KEYWORDS)
+        center = self._list_ready()
         if center is not None:
             self.recorded_pos = center
             self._log(
-                u"识别到「飞天」+「%%vol」，点击文字节点进入，位置 (%d, %d)"
+                u"列表确认（全部/经典/精品），点击「飞天」进入，位置 (%d, %d)"
                 % center
             )
             self.bridge.click_node_by_parts(PRODUCT_KEYWORDS)
             self._goto(READ_DETAIL, u"已进入商品，读取详情页…")
             return
 
-        # 未找到：可能弹窗未消失，无限等待并记录心跳
+        # 未确认在列表：可能弹窗未消失或停在详情页，无限等待
         self._heartbeat_log(
-            dt, u"列表未识别到商品（可能弹窗未消失），继续等待…"
+            dt, u"未确认在商品列表（弹窗/详情页），继续等待…"
         )
-        self.status = u"等待列表中的商品文字出现…"
+        self.status = u"等待商品列表页…"
 
     # ---------------- READ_DETAIL ----------------
     def _update_read_detail(self, dt, now):
@@ -174,23 +220,35 @@ class FlowCore(object):
         for text in BUY_NOW_TEXTS:
             if self.bridge.click_text(text):
                 self._log(u"识别到「%s」，立即点击购买" % text)
+                self._soldout_pending = False
                 self._goto(
                     POST_PURCHASE,
                     u"已点击购买，等待弹窗处理/返回列表…",
                 )
                 return
 
-        # 2) 已售罄：返回列表 → 结束启动器
+        # 2) 已售罄：需二次确认——先返回列表重新进入，
+        #    再次读到的按钮仍为售罄才结束（防 H5 缓存旧状态误判）
         sold_out = False
         for text in SOLD_OUT_TEXTS:
             if self.bridge.text_exists(text):
                 sold_out = True
                 break
         if sold_out:
-            self._log(u"识别到「已售罄」，返回列表，结束启动器")
+            if self._soldout_pending:
+                self._log(
+                    u"二次进入确认仍为「已售罄」，返回列表，结束启动器"
+                )
+                self.bridge.back()
+                self.request_app_exit = True
+                self._finish(True, u"商品已售罄（二次确认），启动器结束")
+                return
+            self._soldout_pending = True
+            self._log(
+                u"首次识别到「已售罄」，返回列表并重新进入复核"
+            )
             self.bridge.back()
-            self.request_app_exit = True
-            self._finish(True, u"商品已售罄，启动器结束")
+            self._goto(ENTER_PRODUCT, u"售罄复核，重新进入确认…")
             return
 
         # 3) 开售时间（右下角区域）
@@ -209,6 +267,8 @@ class FlowCore(object):
             if self._stable_count < STABLE_READ_COUNT:
                 self.status = u"等待详情页时间稳定…"
                 return
+            # 读到有效时间，说明未售罄，撤销售罄复核标记
+            self._soldout_pending = False
             try:
                 hour, minute = (int(v) for v in hhmm.split(u":"))
             except ValueError:
@@ -253,12 +313,42 @@ class FlowCore(object):
 
     # ---------------- POST_PURCHASE ----------------
     def _update_post_purchase(self, dt, now):
-        """购买后：只等待弹窗消失，列表重新出现商品即进入读下一场"""
-        center = self.bridge.node_center(PRODUCT_KEYWORDS)
+        """
+        点击购买后（购买按钮本身不会消失，只以弹窗出现为生效依据）：
+        1) BUY_VERIFY_SECONDS 内出现弹窗特征文字 → 点击生效，
+           只等待、不点任何弹窗按钮；
+        2) 到时仍无弹窗 → 判定无响应，返回列表重新进入再点；
+        3) 列表标签+商品双确认回到列表后，进入读取下一场。
+        """
+        # 1) 点击生效验证：等弹窗出现
+        if not self._buy_verified:
+            self._elapsed += dt
+            if self._popup_visible():
+                self._buy_verified = True
+                self._log(u"购买弹窗已出现，点击生效，等待处理…")
+                if callable(getattr(self, "on_popup_success", None)):
+                    try:
+                        self.on_popup_success()
+                    except Exception:
+                        pass
+            elif self._elapsed >= BUY_VERIFY_SECONDS:
+                self._log(
+                    u"点击购买后 %.1f 秒未出现弹窗，"
+                    u"返回列表重新进入" % self._elapsed
+                )
+                self.bridge.back()
+                self._goto(ENTER_PRODUCT, u"购买无响应，返回重进…")
+                return
+            else:
+                # 0.3 秒窗口内，继续等弹窗
+                return
+
+        # 2) 等待真正回到列表（标签+商品双确认，排除详情页标题）
+        center = self._list_ready()
         if center is not None:
             self.recorded_pos = center
             self._log(
-                u"购买后已返回列表，重新进入商品读取下一场，位置 (%d, %d)"
+                u"已返回列表，重新进入商品读取下一场，位置 (%d, %d)"
                 % center
             )
             self.bridge.click_node_by_parts(PRODUCT_KEYWORDS)
@@ -294,7 +384,7 @@ class FlowCore(object):
         """已过时间：间隔后重新进入商品读取下一场"""
         self._elapsed += dt
         if self._elapsed >= RE_SCOUT_INTERVAL:
-            center = self.bridge.node_center(PRODUCT_KEYWORDS)
+            center = self._list_ready()
             if center is not None:
                 self.recorded_pos = center
                 self._log(
