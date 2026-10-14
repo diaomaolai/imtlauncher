@@ -58,6 +58,21 @@ jobs:
           open(tpl, "w").write(t)
           print("injected accessibility service into manifest template")
           PATCH
+          # 卡密接口是 http:// 明文地址，Android 9+ 默认禁止明文流量，
+          # 在 <application> 上显式开启 usesCleartextTraffic。
+          python3 - <<'PATCH'
+          tpl = "../p4a/pythonforandroid/bootstraps/_sdl_common/build/templates/AndroidManifest.tmpl.xml"
+          t = open(tpl).read()
+          assert "<application" in t, "application tag not found"
+          if "usesCleartextTraffic" not in t:
+              t = t.replace(
+                  "<application",
+                  '<application\n        android:usesCleartextTraffic="true"',
+                  1,
+              )
+          open(tpl, "w").write(t)
+          print("enabled usesCleartextTraffic for HTTP card API")
+          PATCH
 
       - name: Install Buildozer
         run: |

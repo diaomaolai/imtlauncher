@@ -268,6 +268,75 @@ public class MtA11yService extends AccessibilityService {
     }
 
     /**
+     * 只在指定绝对像素区域内查找并点击包含指定文字的控件
+     * （区域直接填像素，不做比例换算）。
+     *
+     * 关键兼容：i 茅台底部标签（首页/i购/π社区/小茅运/我的）的文字
+     * 节点本身是 bounds=[0,0][0,0] 的占位节点，直接按区域过滤会全部
+     * 落空。这里先在全树找文字节点，再沿父链向上找"有真实尺寸且中心
+     * 落在区域内"的祖先，交由 clickNode 再向上找可点击父布局。
+     */
+    public boolean clickByTextInPxRegion(String text, int minX, int minY,
+                                         int maxX, int maxY) {
+        Rect region = new Rect(minX, minY, maxX, maxY);
+        for (AccessibilityNodeInfo root : roots()) {
+            List<AccessibilityNodeInfo> hits = new ArrayList<>();
+            findByText(root, text, null, hits);
+            for (AccessibilityNodeInfo hit : hits) {
+                AccessibilityNodeInfo target = nodeInRegionUp(hit, region);
+                if (target != null) {
+                    boolean ok = clickNode(target);
+                    recycle(root);
+                    return ok;
+                }
+            }
+            recycle(root);
+        }
+        return false;
+    }
+
+    /**
+     * 绝对像素区域内是否存在"可见的"指定文字（同样支持 0x0 文字节点
+     * 向上找有真实尺寸的祖先）。用于判断当前是否处于 i购 页、
+     * 底部标签栏是否渲染完成。
+     */
+    public boolean textVisibleInPxRegion(String text, int minX, int minY,
+                                         int maxX, int maxY) {
+        Rect region = new Rect(minX, minY, maxX, maxY);
+        for (AccessibilityNodeInfo root : roots()) {
+            List<AccessibilityNodeInfo> hits = new ArrayList<>();
+            findByText(root, text, null, hits);
+            for (AccessibilityNodeInfo hit : hits) {
+                if (nodeInRegionUp(hit, region) != null) {
+                    recycle(root);
+                    return true;
+                }
+            }
+            recycle(root);
+        }
+        return false;
+    }
+
+    /**
+     * 从文字节点沿父链向上，返回第一个"有真实尺寸且中心落在区域内"
+     * 的节点（最多向上 6 层）；找不到返回 null。
+     */
+    private AccessibilityNodeInfo nodeInRegionUp(AccessibilityNodeInfo node,
+                                                 Rect region) {
+        AccessibilityNodeInfo cur = node;
+        for (int hops = 0; cur != null && hops <= 6; hops++) {
+            Rect rect = new Rect();
+            cur.getBoundsInScreen(rect);
+            if (rect.width() > 1 && rect.height() > 1
+                    && region.contains(rect.centerX(), rect.centerY())) {
+                return cur;
+            }
+            cur = cur.getParent();
+        }
+        return null;
+    }
+
+    /**
      * 只在指定绝对像素区域内扫描匹配正则的控件文字
      * （区域直接填像素，不做比例换算）。
      */

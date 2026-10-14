@@ -11,7 +11,7 @@ source.include_exts = py,png,jpg,kv,atlas,xml,ttf,ttc
 source.exclude_dirs = bin,buildozer,.github
 
 # 版本号
-version = 1.2.2
+version = 1.2.3
 
 # 依赖：python3 + kivy 界面 + pyjnius 调安卓原生 API
 requirements = python3,kivy,pyjnius
@@ -44,7 +44,8 @@ android.res_xml = a11y_res/imt_a11y_config.xml
 
 # 兜底扫描全部已安装应用需要（个人自用、不上架 Google Play；
 # 上架 Google Play 会被限制，侧载安装不受影响）
-android.permissions = QUERY_ALL_PACKAGES
+# INTERNET / ACCESS_NETWORK_STATE：卡密登录与抢购记录上报需要
+android.permissions = QUERY_ALL_PACKAGES, INTERNET, ACCESS_NETWORK_STATE
 
 # 自动接受 SDK 许可、启用 AndroidX
 android.accept_sdk_license = True

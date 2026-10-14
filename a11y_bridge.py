@@ -109,6 +109,40 @@ class A11yBridge(object):
         except Exception:
             return False
 
+    def click_text_in_px_region(self, text, region_px):
+        """
+        在指定绝对像素区域 (min_x, min_y, max_x, max_y) 内查找并点击
+        包含指定文字的控件，成功返回 True。
+        底部标签等文字节点是 0x0 占位节点时，会自动沿父链向上找
+        落在区域内、可点击的父布局。
+        """
+        service = self._service_or_none()
+        if service is None:
+            return False
+        try:
+            min_x, min_y, max_x, max_y = region_px
+            return bool(service.clickByTextInPxRegion(
+                text, int(min_x), int(min_y), int(max_x), int(max_y)
+            ))
+        except Exception:
+            return False
+
+    def text_exists_in_px_region(self, text, region_px):
+        """
+        区域内是否存在可见的指定文字（0x0 占位节点会向上找有真实
+        尺寸的祖先），用于判断页面是否到达。
+        """
+        service = self._service_or_none()
+        if service is None:
+            return False
+        try:
+            min_x, min_y, max_x, max_y = region_px
+            return bool(service.textVisibleInPxRegion(
+                text, int(min_x), int(min_y), int(max_x), int(max_y)
+            ))
+        except Exception:
+            return False
+
     # ---------------- 文字读取 ----------------
     def find_regex_in_px_region(self, regex, region_px):
         """

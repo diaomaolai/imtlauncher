@@ -8,7 +8,7 @@
 
 # ---------------- 基础信息 ----------------
 APP_TITLE = u"i茅台助手"
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.3"
 
 # 物理屏幕像素（adb shell wm size: 1080x2400）
 SCREEN_WIDTH = 1080
@@ -87,11 +87,61 @@ TAP_JITTER_PX = 6
 # 主循环间隔（秒）
 TICK_INTERVAL = 0.3
 
+# ---------------- 启动后导航（i购 → 经典）----------------
+# 拉起 i茅台后先做区域限定识别点击：首页底部点「i购」→
+# i购页子标签点「经典」，进入经典列表后才开始识别飞天商品。
+# 注意：i购默认「全部」视图里有「鼓乐飞天」(含飞天+%vol)，
+# 不点经典直接识别会点错商品。
+#
+# 底部 i购 tab 的文字节点是 0x0 占位节点，真正可点击的是
+# 第 3 层父布局，真机实测 bounds=[216,2043][432,2161]
+# （5 等分标签栏的第 2 格）。
+IGOU_TAB_TEXT = u"i购"
+IGOU_TAB_REGION_PX = (120, 2000, 540, 2180)
+
+# i购页子标签「经典」的识别区域（绝对像素）。
+# 真机 uiautomator dump 实测：
+#   经典可点击容器 bounds=[202,966][337,1056]，文字中心 (269,1011)
+#   相邻 全部中心 x=134、精品中心 x=404，区域只框住经典一格。
+JINGDIAN_TAB_TEXT = u"经典"
+JINGDIAN_TAB_REGION_PX = (150, 930, 400, 1090)
+
 # 界面默认时间
 DEFAULT_TIME_TEXT = u"08:00:01"
 
-# ---------------- 状态上报 ----------------
-# 抢购状态上报接口（"空接口"先留空，仅记录日志不发送；
-# 部署后在此填 http(s) 地址，打开 APP 时会以 POST 发送
-# 报文：机器码;状态码;日期时间;定时时间）
-REPORT_URL = u""
+# ---------------- 多场次自动启动（预留，默认关闭）----------------
+# 总开关：True 时每个场次到点检查流程是否已在运行，未运行则
+# 自动拉起 i茅台并武装流程；False 时完全走手动定时逻辑。
+ENABLE_SLOT_AUTOSTART = False
+
+# 上午场（每天 09:00 起，5 分钟一场）
+MORNING_SLOTS = (
+    "09:00", "09:05", "09:10", "09:15", "09:20", "09:25",
+)
+# 晚上场（每天 20:00 起，5 分钟一场）
+EVENING_SLOTS = (
+    "20:00", "20:05", "20:10", "20:15", "20:20", "20:25",
+)
+# 场次判定窗口：到达某场次时间后的 N 秒内允许自启动，
+# 防止轮询抖动错过整点
+SLOT_FIRE_WINDOW_SECONDS = 3
+# 自启动后冷启动等待（i茅台加固，冷启动约 13 秒；仅记录日志）
+SLOT_APP_LAUNCH_LOG = u"已自动拉起 i茅台，等待进入 i购商品列表页"
+
+# ---------------- 卡密 / 状态上报 ----------------
+# 卡密服务地址（设备绑定卡密管理系统，Swagger:
+# http://120.77.83.232:8239/swagger-ui ）
+# 四个接口：
+#   POST /api/card/login        卡密登录（校验卡密+一机一码绑定，发 Token）
+#   POST /api/card/info         查询卡密剩余次数/到期时间（不扣次）
+#   POST /api/card/decrease     扣减一次抢购次数
+#   POST /api/card/rush-record  上报抢购记录（status 0失败 1成功）
+CARD_API_BASE = u"http://120.77.83.232:8239"
+CARD_LOGIN_PATH = u"/api/card/login"
+CARD_INFO_PATH = u"/api/card/info"
+CARD_DECREASE_PATH = u"/api/card/decrease"
+RUSH_RECORD_PATH = u"/api/card/rush-record"
+
+# 本地"空接口"开关：为 True 时不联网，只写日志（保留调试用）。
+# 卡密文本框为空时也只记录不发送。
+REPORT_DISABLED = False

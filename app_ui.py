@@ -82,6 +82,24 @@ class MainScreen(BoxLayout):
         )
         self.add_widget(self.device_input)
 
+        # ---- 卡密区域（默认空，由用户填写，用于登录与状态上报）----
+        self.card_caption = Label(
+            text=u"卡密（如 7XZJ5-HFTN6-7LN8R-2MD3L）",
+            font_size="15sp",
+            color=(0.35, 0.35, 0.35, 1),
+            size_hint=(1, 0.05),
+        )
+        self.add_widget(self.card_caption)
+
+        self.card_input = TextInput(
+            text=u"",
+            font_size="16sp",
+            halign="center",
+            multiline=False,
+            size_hint=(1, 0.07),
+        )
+        self.add_widget(self.card_input)
+
         # ---- 定时区域 ----
         self.time_caption = Label(
             text=u"定时启动时间（HH:MM:SS）",
@@ -130,6 +148,11 @@ class MainScreen(BoxLayout):
     def get_device_code(self):
         """获取设备标识文本框内容（SN + Android ID）"""
         return self.device_input.text.strip()
+
+    # ---- 卡密 ----
+    def get_card_key(self):
+        """获取卡密文本框内容（默认空）"""
+        return self.card_input.text.strip()
 
     # ---- 定时相关 ----
     def get_time_text(self):

@@ -26,6 +26,7 @@ from scheduler import parse_target_time, format_remaining
 from app_logger import AppLogger
 from app_ui import MainScreen
 from status_reporter import StatusStore, send_report
+from slot_monitor import SlotMonitor
 
 
 class FlowWorker(threading.Thread):
@@ -90,16 +91,67 @@ class IMtAssistantApp(App):
         self.screen = MainScreen()
         self.screen.schedule_btn.bind(on_press=self._on_schedule_pressed)
 
-        # 打开 APP 即上报上一场状态（机器码;状态码;日期时间;定时时间）
+        # 打开 APP 即上报上一场状态：
+        # 机器码;卡密;状态码;日期时间;定时时间（先登录卡密再上报）
+        card_no = self.screen.get_card_key() \
+            or self.status_store.snapshot().get(u"card_no", u"")
         send_report(
             self.screen.get_device_code(),
+            card_no,
             self.status_store,
             self.app_logger,
         )
 
         # 界面刷新循环（只更新界面；流程推进在工作线程）
         Clock.schedule_interval(self._tick, TICK_INTERVAL)
+
+        # 多场次自动启动监控（ENABLE_SLOT_AUTOSTART=False 时空转不动作）
+        self.slot_monitor = SlotMonitor(
+            is_running_fn=self._is_flow_running,
+            autostart_fn=self._auto_arm,
+            logger=self.app_logger,
+        )
+        self.slot_monitor.start()
+
         return self.screen
+
+    def _is_flow_running(self):
+        """场次监控判断当前是否已有抢购流程在跑"""
+        return (
+            self.flow_worker is not None
+            and not self.flow.is_done
+        )
+
+    def _auto_arm(self, target):
+        """
+        场次到点自动武装：先停掉旧流程，再以该时刻立即启动
+        （target 已到点，IDLE 会立刻进入识别）。
+        """
+        if self.flow_worker is not None:
+            self.flow_worker.stop()
+            self.flow_worker = None
+
+        self.flow.reset(target)
+        self.status_store.mark_start(
+            target.strftime(u"%H:%M:00"),
+            self.screen.get_card_key(),
+        )
+        self.flow.on_popup_success = self.status_store.mark_success
+        self.app_logger.log(
+            u"设备标识：%s" % self.screen.get_device_code()
+        )
+
+        self.flow_worker = FlowWorker(self.flow, self.app_logger)
+        self.flow_worker.start()
+
+        def _update_ui(_dt):
+            self.screen.set_schedule_button_armed(True)
+            self.screen.set_status(
+                u"场次自启动：%s"
+                % target.strftime(u"%Y-%m-%d %H:%M:%S")
+            )
+
+        Clock.schedule_once(_update_ui)
 
     # ---------------- 定时武装 ----------------
     def _on_schedule_pressed(self, instance):
@@ -116,8 +168,11 @@ class IMtAssistantApp(App):
 
         self.flow.reset(target)
 
-        # 新一场开始：上报状态清零；弹窗出现时由回调置 1
-        self.status_store.mark_start(self.screen.get_time_text())
+        # 新一场开始：上报状态清零，记录卡密；弹窗出现时由回调置 1
+        self.status_store.mark_start(
+            self.screen.get_time_text(),
+            self.screen.get_card_key(),
+        )
         self.flow.on_popup_success = self.status_store.mark_success
 
         # 记录本次设备标识（SN + Android ID，取自界面文本框）

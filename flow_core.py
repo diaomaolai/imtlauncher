@@ -2,7 +2,9 @@
 """
 核心流程模块（循环作战版）
 
-前提：手动打开 i茅台并停在 i购商品列表页（能看到飞天商品）。
+首次触发时先自动导航：首页底部区域识别点「i购」→ i购页
+子标签区域识别点「经典」→ 经典列表出现「飞天」+「%vol」后才进入商品
+（i购默认「全部」视图有「鼓乐飞天」，不点经典会误点）。
 
 总原则：
 - 已售罄：需二次确认（返回列表重新进入仍为售罄）才结束启动器，
@@ -49,10 +51,15 @@ from config import (
     STABLE_READ_COUNT,
     WAIT_HEARTBEAT,
     TAP_JITTER_PX,
+    IGOU_TAB_TEXT,
+    IGOU_TAB_REGION_PX,
+    JINGDIAN_TAB_TEXT,
+    JINGDIAN_TAB_REGION_PX,
 )
 
 # 状态
 IDLE = u"IDLE"                # 等待首次倒计时
+NAVIGATE_IGOU = u"NAV"        # 启动后导航：点 i购 → 点经典
 ENTER_PRODUCT = u"ENTER"      # 列表查找商品并点击进入
 READ_DETAIL = u"READ"         # 详情页识别按钮
 POST_PURCHASE = u"POST"       # 购买后等待弹窗/返回列表
@@ -81,6 +88,9 @@ class FlowCore(object):
         self._stable_count = 0
         self._buy_verified = False
         self._soldout_pending = False
+        # 导航阶段标记（只在每次运行开始时走一次）
+        self._nav_igou_clicked = False
+        self._nav_jd_clicked = False
         # 弹窗确认成功回调（由 main 注入，用于状态上报置 1）
         self.on_popup_success = None
 
@@ -108,6 +118,8 @@ class FlowCore(object):
         self._stable_count = 0
         self._buy_verified = False
         self._soldout_pending = False
+        self._nav_igou_clicked = False
+        self._nav_jd_clicked = False
         self._log(
             u"已设置定时，首次触发时刻 %s"
             % first_target.strftime(u"%Y-%m-%d %H:%M:%S")
@@ -127,6 +139,8 @@ class FlowCore(object):
     def update(self, dt, now):
         if self.state == IDLE:
             self._update_idle(now)
+        elif self.state == NAVIGATE_IGOU:
+            self._update_navigate(dt, now)
         elif self.state == ENTER_PRODUCT:
             self._update_enter_product(dt, now)
         elif self.state == READ_DETAIL:
@@ -181,8 +195,83 @@ class FlowCore(object):
     # ---------------- IDLE ----------------
     def _update_idle(self, now):
         if now >= self.first_target:
-            self._log(u"倒计时到达，开始识别商品「飞天%vol」")
-            self._goto(ENTER_PRODUCT, u"正在识别商品…")
+            self._log(u"倒计时到达，开始自动进入 i购→经典")
+            self._goto(NAVIGATE_IGOU, u"正在进入 i购…")
+
+    # ---------------- NAVIGATE_IGOU ----------------
+    def _update_navigate(self, dt, now):
+        """
+        启动后导航（区域限定识别，再点击）：
+        1) i购页的子标签「经典」可见 → 已在 i购，点击经典；
+        2) 否则底部 i购 tab 可见 → 在首页，点击 i购（只点一次）；
+        3) 经典点击后，等经典列表双确认（飞天+%vol 与 全部/经典/精品），
+           确认后进入商品，后续逻辑不变。
+        全程动态轮询，不设固定等待。
+        """
+        if not self.bridge.is_connected():
+            self._finish(
+                False,
+                u"无障碍服务未开启，请先到设置中开启后重新定时",
+            )
+            return
+
+        # 第一步：点 i购；第二步：点经典
+        if not self._nav_jd_clicked:
+            if self.bridge.text_exists_in_px_region(
+                JINGDIAN_TAB_TEXT, JINGDIAN_TAB_REGION_PX
+            ):
+                self._log(
+                    u"已在 i购，区域内识别到「经典」，点击经典"
+                )
+                if self.bridge.click_text_in_px_region(
+                    JINGDIAN_TAB_TEXT, JINGDIAN_TAB_REGION_PX
+                ):
+                    self._nav_jd_clicked = True
+                    self.status = u"已点击经典，等待商品列表…"
+                else:
+                    self._log(u"「经典」点击失败，下轮重试")
+                return
+
+            if not self._nav_igou_clicked:
+                if self.bridge.text_exists_in_px_region(
+                    IGOU_TAB_TEXT, IGOU_TAB_REGION_PX
+                ):
+                    self._log(
+                        u"首页底部区域内识别到「i购」，点击 i购"
+                    )
+                    if self.bridge.click_text_in_px_region(
+                        IGOU_TAB_TEXT, IGOU_TAB_REGION_PX
+                    ):
+                        self._nav_igou_clicked = True
+                        self.status = u"已点击 i购，等待页面加载…"
+                    else:
+                        self._log(u"「i购」点击失败，下轮重试")
+                    return
+
+            # 冷启动/页面加载中：无限等，i购 tab 或经典子标签出现即动作
+            self._heartbeat_log(
+                dt, u"等待 i茅台加载（寻找 i购/经典）…"
+            )
+            self.status = u"等待 i茅台页面加载…"
+            return
+
+        # 经典已点：等经典列表双确认，确认后进入商品
+        center = self._list_ready()
+        if center is not None:
+            self.recorded_pos = center
+            self._log(
+                u"经典列表确认（全部/经典/精品），点击「飞天」进入，位置 (%d, %d)"
+                % center
+            )
+            self.bridge.click_node_by_parts(PRODUCT_KEYWORDS)
+            self._goto(READ_DETAIL, u"已进入商品，读取详情页…")
+            return
+
+        self._heartbeat_log(
+            dt, u"已点经典，等待经典列表渲染（飞天+%vol）…"
+        )
+        self.status = u"等待经典商品列表…"
+
 
     # ---------------- ENTER_PRODUCT ----------------
     def _update_enter_product(self, dt, now):
