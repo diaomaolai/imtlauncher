@@ -8,7 +8,7 @@
 
 # ---------------- 基础信息 ----------------
 APP_TITLE = u"i茅台助手"
-APP_VERSION = "1.2.4"
+APP_VERSION = "1.2.5"
 
 # 物理屏幕像素（adb shell wm size: 1080x2400）
 SCREEN_WIDTH = 1080

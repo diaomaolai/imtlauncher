@@ -30,6 +30,7 @@
 """
 
 import json
+import ssl
 
 from config import (
     CARD_API_BASE,
@@ -42,7 +43,39 @@ from config import (
 )
 
 
-def _post_json(path, body, timeout=None):
+def _verified_context():
+    """
+    优先使用 certifi 内置 CA 根证书库（安卓打包内置）；
+    没有 certifi 时退回系统默认信任库。
+    """
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+def _unverified_context():
+    """最后兜底：跳过证书校验（仅在证书链异常时一次性降级使用）"""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def _is_cert_error(exc):
+    """判断是否为证书校验类错误"""
+    if isinstance(exc, ssl.SSLError):
+        text = u"%s" % exc
+        return (
+            u"CERTIFICATE" in text
+            or u"certificate" in text
+            or u"issuer" in text
+        )
+    return False
+
+
+def _post_json(path, body, timeout=None, context=None):
     """同步 POST JSON，返回 (http_status, dict|str)。异常向上抛。"""
     import urllib.request
 
@@ -60,7 +93,9 @@ def _post_json(path, body, timeout=None):
             u"User-Agent": u"imtlauncher",
         },
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    if context is None:
+        context = _verified_context()
+    with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
         raw = resp.read().decode(u"utf-8", u"replace")
         http_status = getattr(resp, u"status", 0)
     try:
@@ -73,6 +108,7 @@ def _result(path, body, log=None):
     """
     统一执行：REPORT_DISABLED 直接返回禁用；
     成功判定 code == 200；任何异常都包装成 (False, message, {})。
+    证书校验失败时降级为不校验证书重试一次（保证弱环境可达）。
     """
     def _emit(line):
         if log is not None:
@@ -88,8 +124,19 @@ def _result(path, body, log=None):
     try:
         http_code, resp = _post_json(path, body)
     except Exception as exc:
-        _emit(u"请求 %s 网络异常：%s" % (path, exc))
-        return False, u"网络异常：%s" % exc, {}
+        if _is_cert_error(exc):
+            _emit(u"请求 %s 证书校验失败（%s），降级为不校验证书重试"
+                  % (path, exc))
+            try:
+                http_code, resp = _post_json(
+                    path, body, context=_unverified_context()
+                )
+            except Exception as exc2:
+                _emit(u"请求 %s 降级后仍失败：%s" % (path, exc2))
+                return False, u"网络异常：%s" % exc2, {}
+        else:
+            _emit(u"请求 %s 网络异常：%s" % (path, exc))
+            return False, u"网络异常：%s" % exc, {}
 
     if not isinstance(resp, dict):
         _emit(u"请求 %s 响应非 JSON：%s" % (path, resp))

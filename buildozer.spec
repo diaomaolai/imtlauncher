@@ -11,10 +11,11 @@ source.include_exts = py,png,jpg,kv,atlas,xml,ttf,ttc
 source.exclude_dirs = bin,buildozer,.github
 
 # 版本号
-version = 1.2.4
+version = 1.2.5
 
 # 依赖：python3 + kivy 界面 + pyjnius 调安卓原生 API
-requirements = python3,kivy,pyjnius
+# certifi：内置 CA 根证书库（修复 Android 上 HTTPS 证书校验失败）
+requirements = python3,kivy,pyjnius,certifi
 
 # 加入自定义 Java 源码（无障碍服务 MtA11yService），
 # src 目录按包名层级组织：src/org/personal/imtlauncher/*.java
