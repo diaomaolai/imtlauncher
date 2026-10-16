@@ -47,6 +47,12 @@ class SlotMonitor(threading.Thread):
         self.logger = logger
         self._fired = set()
         self._stop_event = threading.Event()
+        # 运行期开关：卡密授权登录成功后才置 True；未登录时空转
+        self.enabled = False
+
+    def set_enabled(self, enabled):
+        """卡密登录解锁/锁定到点自启动"""
+        self.enabled = bool(enabled)
 
     def stop(self):
         self._stop_event.set()
@@ -59,7 +65,7 @@ class SlotMonitor(threading.Thread):
 
     def check_once(self, now):
         """供线程每轮调用，也可单测时直接调用"""
-        if not ENABLE_SLOT_AUTOSTART:
+        if not ENABLE_SLOT_AUTOSTART or not self.enabled:
             return
         for hhmm in tuple(MORNING_SLOTS) + tuple(EVENING_SLOTS):
             try:

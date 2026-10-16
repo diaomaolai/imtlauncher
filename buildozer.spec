@@ -1,4 +1,4 @@
-[app]
+﻿[app]
 
 # 应用信息
 title = i茅台启动器
@@ -11,7 +11,7 @@ source.include_exts = py,png,jpg,kv,atlas,xml,ttf,ttc
 source.exclude_dirs = bin,buildozer,.github
 
 # 版本号
-version = 1.2.3
+version = 1.2.4
 
 # 依赖：python3 + kivy 界面 + pyjnius 调安卓原生 API
 requirements = python3,kivy,pyjnius

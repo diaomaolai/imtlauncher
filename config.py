@@ -8,7 +8,7 @@
 
 # ---------------- 基础信息 ----------------
 APP_TITLE = u"i茅台助手"
-APP_VERSION = "1.2.3"
+APP_VERSION = "1.2.4"
 
 # 物理屏幕像素（adb shell wm size: 1080x2400）
 SCREEN_WIDTH = 1080
@@ -109,10 +109,11 @@ JINGDIAN_TAB_REGION_PX = (150, 930, 400, 1090)
 # 界面默认时间
 DEFAULT_TIME_TEXT = u"08:00:01"
 
-# ---------------- 多场次自动启动（预留，默认关闭）----------------
-# 总开关：True 时每个场次到点检查流程是否已在运行，未运行则
-# 自动拉起 i茅台并武装流程；False 时完全走手动定时逻辑。
-ENABLE_SLOT_AUTOSTART = False
+# ---------------- 多场次自动启动 ----------------
+# 编译期总开关：True 时具备多场次自启动能力；
+# 运行期还必须卡密登录授权后才会真正解锁（见 card_client/主程序）。
+# 未填卡密 / 未登录时，定时按钮与自启动一律锁定不可用。
+ENABLE_SLOT_AUTOSTART = True
 
 # 上午场（每天 09:00 起，5 分钟一场）
 MORNING_SLOTS = (
@@ -129,19 +130,20 @@ SLOT_FIRE_WINDOW_SECONDS = 3
 SLOT_APP_LAUNCH_LOG = u"已自动拉起 i茅台，等待进入 i购商品列表页"
 
 # ---------------- 卡密 / 状态上报 ----------------
-# 卡密服务地址（设备绑定卡密管理系统，Swagger:
-# http://120.77.83.232:8239/swagger-ui ）
-# 四个接口：
-#   POST /api/card/login        卡密登录（校验卡密+一机一码绑定，发 Token）
+# 卡密服务地址（设备绑定卡密管理系统，HTTPS）
+# 四个接口（全部 POST JSON）：
+#   POST /api/card/login        卡密授权登录（校验卡密+一机一码绑定，发 Token）
 #   POST /api/card/info         查询卡密剩余次数/到期时间（不扣次）
 #   POST /api/card/decrease     扣减一次抢购次数
 #   POST /api/card/rush-record  上报抢购记录（status 0失败 1成功）
-CARD_API_BASE = u"http://120.77.83.232:8239"
+CARD_API_BASE = u"https://www.20471.top"
 CARD_LOGIN_PATH = u"/api/card/login"
 CARD_INFO_PATH = u"/api/card/info"
 CARD_DECREASE_PATH = u"/api/card/decrease"
 RUSH_RECORD_PATH = u"/api/card/rush-record"
 
+# 网络请求超时（秒）
+CARD_HTTP_TIMEOUT = 10
+
 # 本地"空接口"开关：为 True 时不联网，只写日志（保留调试用）。
-# 卡密文本框为空时也只记录不发送。
 REPORT_DISABLED = False
