@@ -20,23 +20,28 @@
 循环逻辑：
 1. 定时到点 → 列表双确认 → 点击飞天文字节点（记录位置）→ 进详情；
 2. 详情页（动态识别，无固定等待）：
-   - 立即抢购/立即购买：0.3 秒轮询，识别到立刻点（1 秒内完成）；
+   - 立即抢购/立即购买：识别到立刻点（1 秒内完成），随后进入连点模式：
+     以 0.xx 秒随机间隔持续点击购买按钮，不返回上一层，直到售罄；
    - 开售时间（按钮"HH:MM投放"，右下角区域）：连续 2 次读数一致
      才采信；未来时间返回列表等整点（不加秒）；已过时间返回列表，
      每 4 秒重新进入侦察下一场；
    - 已售罄：首次返回列表重新进入复核，第二次仍售罄才结束；
    - 未识别到：不中止、不返回，无限等待（应对弹窗/未刷新）；
-3. 点击购买后（按钮不会消失，只以弹窗出现为生效依据）：
-   - 0.3 秒内出现弹窗 → 点击生效，只等待，不点任何弹窗按钮；
-   - 0.3 秒内未出现弹窗 → 返回列表重进再点；
-   - 列表双确认回来后 → 重新进入读下一场；
+3. 连点模式（点击购买后）：
+   - 一直点购买按钮，不返回上一层；节点级 ACTION_CLICK，
+     不会误点到弹窗上的按钮；
+   - 期间出现弹窗（支付确认/安全组件填字）→ 判定成功一次
+     （上报 rush-record + 扣次），不点任何弹窗按钮，连点不中断；
+   - 按钮变为开售时间 → 交回详情识别（WAIT/重侦）；
+   - 只有识别到「已售罄」才停止：返回列表重新进入复核，
+     二次仍为售罄才结束；
 4. 整点等待：到点点击记录位置进入，交由详情页处理；
 5. 弹窗（含风控倒计时）：任何环节只等待，不点任何按钮。
 
 全程通过 AppLogger 打印并写入 txt 日志。
 """
 
-from datetime import timedelta
+import time
 
 from config import (
     PRODUCT_KEYWORDS,
@@ -44,7 +49,7 @@ from config import (
     BUY_NOW_TEXTS,
     LIST_MARKER_TEXTS,
     POPUP_MARKER_TEXTS,
-    BUY_VERIFY_SECONDS,
+    rapid_click_delay,
     SOLD_OUT_TEXTS,
     SALE_TIME_REGEX,
     RE_SCOUT_INTERVAL,
@@ -62,7 +67,7 @@ IDLE = u"IDLE"                # 等待首次倒计时
 NAVIGATE_IGOU = u"NAV"        # 启动后导航：点 i购 → 点经典
 ENTER_PRODUCT = u"ENTER"      # 列表查找商品并点击进入
 READ_DETAIL = u"READ"         # 详情页识别按钮
-POST_PURCHASE = u"POST"       # 购买后等待弹窗/返回列表
+RAPID_BUY = u"RAPID"          # 立即抢购后持续连点（不返回，直到售罄）
 WAIT_TIME = u"WAIT"           # 列表等待开售整点
 RE_SCOUT = u"SCOUT"           # 时间已过，重新进入读取下一场
 DONE = u"DONE"                # 结束（售罄）或中止（异常）
@@ -88,6 +93,8 @@ class FlowCore(object):
         self._stable_count = 0
         self._buy_verified = False
         self._soldout_pending = False
+        # 连点模式：本帧点击计数
+        self._rapid_click_count = 0
         # 导航阶段标记（只在每次运行开始时走一次）
         self._nav_igou_clicked = False
         self._nav_jd_clicked = False
@@ -118,6 +125,7 @@ class FlowCore(object):
         self._stable_count = 0
         self._buy_verified = False
         self._soldout_pending = False
+        self._rapid_click_count = 0
         self._nav_igou_clicked = False
         self._nav_jd_clicked = False
         self._log(
@@ -145,8 +153,8 @@ class FlowCore(object):
             self._update_enter_product(dt, now)
         elif self.state == READ_DETAIL:
             self._update_read_detail(dt, now)
-        elif self.state == POST_PURCHASE:
-            self._update_post_purchase(dt, now)
+        elif self.state == RAPID_BUY:
+            self._update_rapid_buy(dt, now)
         elif self.state == WAIT_TIME:
             self._update_wait_time(dt, now)
         elif self.state == RE_SCOUT:
@@ -161,6 +169,7 @@ class FlowCore(object):
         self._last_time_hit = None
         self._stable_count = 0
         self._buy_verified = False
+        self._rapid_click_count = 0
         # 注意：_soldout_pending 不在此重置，售罄复核要跨 ENTER→READ 保留
 
     def _heartbeat_log(self, dt, message):
@@ -305,14 +314,14 @@ class FlowCore(object):
         """详情页：售罄结束；立即抢购点击；时间则安排或重侦"""
         self._elapsed += dt
 
-        # 1) 立即抢购：1 秒内识别并点击
+        # 1) 立即抢购：1 秒内识别并点击，随后进入连点模式
         for text in BUY_NOW_TEXTS:
             if self.bridge.click_text(text):
                 self._log(u"识别到「%s」，立即点击购买" % text)
                 self._soldout_pending = False
                 self._goto(
-                    POST_PURCHASE,
-                    u"已点击购买，等待弹窗处理/返回列表…",
+                    RAPID_BUY,
+                    u"已点击购买，进入连点模式直到售罄…",
                 )
                 return
 
@@ -400,54 +409,90 @@ class FlowCore(object):
         )
         self.status = u"详情页等待按钮刷新…"
 
-    # ---------------- POST_PURCHASE ----------------
-    def _update_post_purchase(self, dt, now):
+    # ---------------- RAPID_BUY ----------------
+    def _update_rapid_buy(self, dt, now):
         """
-        点击购买后（购买按钮本身不会消失，只以弹窗出现为生效依据）：
-        1) BUY_VERIFY_SECONDS 内出现弹窗特征文字 → 点击生效，
-           只等待、不点任何弹窗按钮；
-        2) 到时仍无弹窗 → 判定无响应，返回列表重新进入再点；
-        3) 列表标签+商品双确认回到列表后，进入读取下一场。
+        识别到立即抢购后进入连点模式（每次 update 是一个连点周期）：
+        - 先做一轮判断：售罄退出 / 弹窗记成功 / 按钮变时间交回 READ；
+        - 然后点击一次购买按钮（节点级 ACTION_CLICK，即使弹窗覆盖也
+          只会点到按钮节点本身，不会误点弹窗按钮）；
+        - 最后 sleep 一个随机 0.xx 秒间隔（0.00~0.99，两位数字各取
+          0-9 随机数）；主循环在 RAPID 状态下不再叠加固定节拍等待，
+          因此实际点击间隔就是该随机间隔本身；
+        - 不返回上一层，直到识别到「已售罄」：返回列表重新进入复核，
+          READ 二次确认仍为售罄才结束启动器。
         """
-        # 1) 点击生效验证：等弹窗出现
-        if not self._buy_verified:
-            self._elapsed += dt
-            if self._popup_visible():
-                self._buy_verified = True
-                self._log(u"购买弹窗已出现，点击生效，等待处理…")
-                if callable(getattr(self, "on_popup_success", None)):
-                    try:
-                        self.on_popup_success()
-                    except Exception:
-                        pass
-            elif self._elapsed >= BUY_VERIFY_SECONDS:
+        if not self.bridge.is_connected():
+            self._finish(
+                False, u"无障碍服务未开启，请先到设置中开启后重新定时"
+            )
+            return
+
+        # 1) 售罄优先（唯一退出条件，首次走复核）
+        sold_out = False
+        for text in SOLD_OUT_TEXTS:
+            if self.bridge.text_exists(text):
+                sold_out = True
+                break
+        if sold_out:
+            self._soldout_pending = True
+            self._log(
+                u"连点中识别到「已售罄」，停止连点，"
+                u"返回列表并重新进入复核"
+            )
+            self.bridge.back()
+            self._goto(ENTER_PRODUCT, u"售罄复核，重新进入确认…")
+            return
+
+        # 2) 弹窗出现：只记一次成功（上报扣次），不点弹窗，连点继续
+        if not self._buy_verified and self._popup_visible():
+            self._buy_verified = True
+            self._log(u"购买弹窗已出现，判定抢购成功（继续连点，不点弹窗）")
+            if callable(getattr(self, "on_popup_success", None)):
+                try:
+                    self.on_popup_success()
+                except Exception:
+                    pass
+
+        # 3) 点击一次购买按钮（找不到文字时返回 False，不报错）
+        clicked = False
+        for text in BUY_NOW_TEXTS:
+            if self.bridge.click_text(text):
+                clicked = True
+                self._rapid_click_count += 1
+                if self._rapid_click_count == 1:
+                    self._log(
+                        u"进入连点模式：每次间隔 0.xx（两位数字各取"
+                        u"0-9 随机数，0.00~0.99 秒）持续点击「%s」，"
+                        u"直到售罄" % text
+                    )
+                elif self._rapid_click_count % 20 == 0:
+                    self._log(
+                        u"连点中：已点击购买 %d 次"
+                        % self._rapid_click_count
+                    )
+                break
+
+        # 4) 按钮文字暂时找不到：可能弹窗遮挡（继续等），
+        #    也可能变成了开售时间（交回 READ 处理）
+        if not clicked:
+            hits = self.bridge.find_regex_in_px_region(
+                SALE_TIME_REGEX, BUTTON_REGION_PX
+            )
+            if hits:
                 self._log(
-                    u"点击购买后 %.1f 秒未出现弹窗，"
-                    u"返回列表重新进入" % self._elapsed
+                    u"连点中按钮变为开售时间 %s，交回详情识别" % hits[0]
                 )
-                self.bridge.back()
-                self._goto(ENTER_PRODUCT, u"购买无响应，返回重进…")
-                return
-            else:
-                # 0.3 秒窗口内，继续等弹窗
+                self._goto(READ_DETAIL, u"按钮变为时间，重新识别…")
                 return
 
-        # 2) 等待真正回到列表（标签+商品双确认，排除详情页标题）
-        center = self._list_ready()
-        if center is not None:
-            self.recorded_pos = center
-            self._log(
-                u"已返回列表，重新进入商品读取下一场，位置 (%d, %d)"
-                % center
-            )
-            self.bridge.click_node_by_parts(PRODUCT_KEYWORDS)
-            self._goto(READ_DETAIL, u"读取下一场详情…")
-            return
-        # 弹窗等待：不点击任何按钮，无限等，心跳记录
-        self._heartbeat_log(
-            dt, u"购买后等待弹窗消失/页面返回列表（不做任何点击）…"
+        self.status = (
+            u"持续连点购买中（已点 %d 次，直到售罄）…"
+            % self._rapid_click_count
         )
-        self.status = u"等待弹窗消失，返回列表…"
+
+        # 5) 随机 0.xx 秒间隔（十分位、百分位各取 0-9 随机数）
+        time.sleep(rapid_click_delay())
 
     # ---------------- WAIT_TIME ----------------
     def _update_wait_time(self, dt, now):

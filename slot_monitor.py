@@ -1,15 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-多场次自动启动监控（预留功能）。
+多场次自动启动监控。
 
 场次时间（config.py，可改）：
   上午：09:00 09:05 09:10 09:15 09:20 09:25
   晚上：20:00 20:05 20:10 20:15 20:20 20:25
+  每个时间节点提前 SLOT_LEAD_SECONDS（默认 180 秒，即 3 分钟）自启动。
 
 行为：
-- 每个场次到点（SLOT_FIRE_WINDOW_SECONDS 窗口内）检查一次：
+- 每个场次的「提前触发时刻」（场次整点 - SLOT_LEAD_SECONDS）后
+  SLOT_FIRE_WINDOW_SECONDS 窗口内检查一次：
   - 抢购流程已在运行 → 只记日志，跳过；
-  - 未启动 → 自动拉起 i茅台，并回调主程序立即武装流程。
+  - 未启动 → 自动拉起 i茅台，并回调主程序立即武装流程，
+    状态机当场开始导航（i购→经典→进详情），读到未来场次时间
+    （如 09:00投放）后返回列表 WAIT 整点，到点再点记录位置进入。
 - 同一场次当天只触发一次，不重复启动。
 - 总开关 ENABLE_SLOT_AUTOSTART=False 时本模块不产生任何动作。
 - 武装后流程先走 NAV 导航：区域识别点「i购」→ 点「经典」，
@@ -17,13 +21,14 @@
 """
 
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from config import (
     ENABLE_SLOT_AUTOSTART,
     MORNING_SLOTS,
     EVENING_SLOTS,
     SLOT_FIRE_WINDOW_SECONDS,
+    SLOT_LEAD_SECONDS,
     SLOT_APP_LAUNCH_LOG,
 )
 from android_launcher import launch_moutai
@@ -64,15 +69,23 @@ class SlotMonitor(threading.Thread):
             print(line)
 
     def check_once(self, now):
-        """供线程每轮调用，也可单测时直接调用"""
+        """供线程每轮调用，也可单测时直接调用。
+
+        触发时刻 = 场次整点 - SLOT_LEAD_SECONDS（提前 3 分钟）。
+        回调 autostart_fn 传入场次整点本身，状态机提前武装开始导航，
+        读到未来场次时间后在列表 WAIT 到整点。
+        """
         if not ENABLE_SLOT_AUTOSTART or not self.enabled:
             return
         for hhmm in tuple(MORNING_SLOTS) + tuple(EVENING_SLOTS):
             try:
-                target = _slot_target(hhmm, now)
+                slot_target = _slot_target(hhmm, now)
             except Exception:
                 continue
-            delta = (now - target).total_seconds()
+            fire_target = slot_target - timedelta(
+                seconds=SLOT_LEAD_SECONDS
+            )
+            delta = (now - fire_target).total_seconds()
             if delta < 0 or delta > SLOT_FIRE_WINDOW_SECONDS:
                 continue
 
@@ -88,17 +101,19 @@ class SlotMonitor(threading.Thread):
 
             if running:
                 self._log(
-                    u"场次 %s 到点，流程已在运行，跳过自启动" % hhmm
+                    u"场次 %s 提前 %d 秒触发，流程已在运行，跳过自启动"
+                    % (hhmm, SLOT_LEAD_SECONDS)
                 )
                 continue
 
             self._log(
-                u"场次 %s 到点，流程未启动，执行自启动" % hhmm
+                u"场次 %s 提前 %d 秒触发，流程未启动，执行自启动"
+                % (hhmm, SLOT_LEAD_SECONDS)
             )
             launch_moutai(self.logger)
             self._log(SLOT_APP_LAUNCH_LOG)
             try:
-                self.autostart_fn(target)
+                self.autostart_fn(slot_target)
             except Exception as exc:
                 self._log(u"自启动武装流程异常：%s" % exc)
 

@@ -24,7 +24,7 @@ from kivy.clock import Clock
 from config import APP_TITLE, TICK_INTERVAL
 from font_setup import register_cjk_font
 from a11y_bridge import A11yBridge
-from flow_core import FlowCore
+from flow_core import FlowCore, RAPID_BUY
 from scheduler import parse_target_time, format_remaining
 from app_logger import AppLogger
 from app_ui import MainScreen
@@ -73,7 +73,12 @@ class FlowWorker(threading.Thread):
             except Exception:
                 pass
 
-            self.stop_event.wait(TICK_INTERVAL)
+            # 连点模式：状态机内部已按随机 0.xx 秒自行 sleep，
+            # 不再叠加固定节拍等待，保证点击间隔就是随机间隔本身
+            if self.flow.state == RAPID_BUY:
+                self.stop_event.wait(0.01)
+            else:
+                self.stop_event.wait(TICK_INTERVAL)
 
 
 class IMtAssistantApp(App):
@@ -298,15 +303,20 @@ class IMtAssistantApp(App):
 
     def _auto_arm(self, target):
         """
-        场次到点自动武装（slot_monitor 线程调用）：
-        先停旧流程，再以该时刻立即启动（卡密已登录才会进入这里）。
+        场次提前 3 分钟自启动武装（slot_monitor 线程调用，
+        传入的 target 为场次整点本身）：
+        先停旧流程，再立即武装（reset 用当前时刻，使状态机当场开始
+        i购→经典→进详情导航）；读到未来场次时间后状态机返回列表
+        WAIT 到整点。上报记录的 scheduled_time 仍写场次整点。
         """
         if self.flow_worker is not None:
             self.flow_worker.stop()
             self.flow_worker = None
 
         def armed():
-            self.flow.reset(target)
+            # 立即开始导航（不再等整点），整点等待由状态机读到按钮
+            # 时间后在 WAIT_TIME 状态完成
+            self.flow.reset(datetime.now())
             self.status_store.mark_start(
                 target.strftime(u"%H:%M:00"),
                 self.screen.get_card_key(),
@@ -315,12 +325,17 @@ class IMtAssistantApp(App):
             self.app_logger.log(
                 u"设备标识：%s" % self.screen.get_device_code()
             )
+            self.app_logger.log(
+                u"已提前武装，目标场次整点 %s"
+                % target.strftime(u"%Y-%m-%d %H:%M:%S")
+            )
 
             self.flow_worker = FlowWorker(self.flow, self.app_logger)
             self.flow_worker.start()
             self.screen.set_schedule_button_armed(True)
             self.screen.set_status(
-                u"场次自启动：%s" % target.strftime(u"%Y-%m-%d %H:%M:%S")
+                u"场次提前自启动，目标 %s"
+                % target.strftime(u"%H:%M:%S")
             )
         self._ui(armed)
 
