@@ -16,11 +16,36 @@ from kivy.metrics import dp
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.label import Label
+from kivy.uix.spinner import Spinner
 from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
 
-from config import APP_TITLE, DEFAULT_TIME_TEXT
+from config import (
+    APP_TITLE,
+    DEFAULT_TIME_TEXT,
+    YEAR_CHOICES,
+    YEAR_TARGET_TEXT,
+)
 from device_info import get_device_code
+
+
+def _time_input_filter(substring, undo):
+    """时间输入框：只允许半角数字、冒号、点（小数秒），
+    挡掉全角数字/全角冒号/中文等"""
+    return u"".join(
+        c
+        for c in substring
+        if c in u"0123456789:."
+    )
+
+
+def _card_input_filter(substring, undo):
+    """卡密输入框：只允许英文字母、数字、中划线，并统一转大写"""
+    return u"".join(
+        c
+        for c in substring
+        if c == u"-" or (c.isascii() and c.isalnum())
+    ).upper()
 
 
 class MainScreen(BoxLayout):
@@ -116,8 +141,13 @@ class MainScreen(BoxLayout):
             font_size="15sp",
             halign="center",
             multiline=False,
+            write_tab=False,
+            input_filter=_card_input_filter,
             size_hint=(1, 0.055),
         )
+        # max_length 不能在构造参数里传（Kivy 2.3.10 构造期会原生崩溃），
+        # 必须构造后再设置
+        self.card_input.max_length = 19
         self.add_widget(self.card_input)
 
         self.login_btn = Button(
@@ -146,6 +176,31 @@ class MainScreen(BoxLayout):
         )
         self.add_widget(self.card_info_label)
 
+        # ---- 年份（规格）下拉：卡密登录后显现，位于卡密与时间之间 ----
+        self.year_row = BoxLayout(
+            orientation="horizontal",
+            spacing=dp(8),
+            size_hint=(1, 0.055),
+            opacity=0,
+            disabled=True,
+        )
+        self.year_caption = Label(
+            text=u"年份（规格）",
+            font_size="14sp",
+            color=(0.35, 0.35, 0.35, 1),
+            size_hint=(0.4, 1),
+        )
+        self.year_row.add_widget(self.year_caption)
+        self.year_spinner = Spinner(
+            text=YEAR_TARGET_TEXT,
+            values=list(YEAR_CHOICES),
+            font_size="16sp",
+            disabled=True,
+            size_hint=(0.6, 1),
+        )
+        self.year_row.add_widget(self.year_spinner)
+        self.add_widget(self.year_row)
+
         # ---- 定时区域（登录前锁定）----
         self.time_caption = Label(
             text=u"定时启动时间（HH:MM:SS）",
@@ -160,9 +215,13 @@ class MainScreen(BoxLayout):
             font_size="20sp",
             halign="center",
             multiline=False,
+            write_tab=False,
+            input_filter=_time_input_filter,
             disabled=True,
             size_hint=(1, 0.07),
         )
+        # max_length 构造后再设置（见 card_input 说明）
+        self.time_input.max_length = 12
         self.add_widget(self.time_input)
 
         self.schedule_btn = Button(
@@ -216,11 +275,21 @@ class MainScreen(BoxLayout):
         """显示卡密信息（剩余次数/到期时间）"""
         self.card_info_label.text = text
 
+    # ---- 年份 ----
+    def get_year_text(self):
+        """获取下拉菜单选定的年份；未选择时为默认年份"""
+        year = (self.year_spinner.text or u"").strip()
+        return year or YEAR_TARGET_TEXT
+
     # ---- 授权解锁 ----
     def set_unlocked(self, unlocked):
         """卡密登录成功后解锁定时区与到点自启动；失败保持锁定"""
         self.schedule_btn.disabled = not unlocked
         self.time_input.disabled = not unlocked
+        # 年份下拉：登录成功后显现并可点，未登录隐藏且禁用
+        self.year_row.opacity = 1 if unlocked else 0
+        self.year_row.disabled = not unlocked
+        self.year_spinner.disabled = not unlocked
         if unlocked:
             self.schedule_btn.text = u"设置定时"
             self.login_btn.text = u"已授权（重新登录）"

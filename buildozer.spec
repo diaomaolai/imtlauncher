@@ -11,7 +11,7 @@ source.include_exts = py,png,jpg,kv,atlas,xml,ttf,ttc
 source.exclude_dirs = bin,buildozer,.github
 
 # 版本号
-version = 1.2.6
+version = 1.2.7
 
 # 依赖：python3 + kivy 界面 + pyjnius 调安卓原生 API
 # certifi：内置 CA 根证书库（修复 Android 上 HTTPS 证书校验失败）

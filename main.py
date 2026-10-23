@@ -24,7 +24,13 @@ from kivy.clock import Clock
 from config import APP_TITLE, TICK_INTERVAL
 from font_setup import register_cjk_font
 from a11y_bridge import A11yBridge
-from flow_core import FlowCore, RAPID_BUY
+from flow_core import (
+    FlowCore,
+    RAPID_BUY,
+    SELECT_YEAR,
+    SELECT_QTY,
+    WAIT_TIME,
+)
 from scheduler import parse_target_time, format_remaining
 from app_logger import AppLogger
 from app_ui import MainScreen
@@ -73,10 +79,17 @@ class FlowWorker(threading.Thread):
             except Exception:
                 pass
 
-            # 连点模式：状态机内部已按随机 0.xx 秒自行 sleep，
-            # 不再叠加固定节拍等待，保证点击间隔就是随机间隔本身
+            # 节拍：
+            # - RAPID 连点：0.01s，保证一轮内连续点击间隔约 10ms；
+            # - 选年份/改数量/整点等待：0.02s，整点重进后年份+数量
+            #   在约 0.1s 内完成，抢购按钮识别点击落在 1 秒内；
+            # - 其余状态（导航/读按钮/侦察）：0.3s 动态轮询。
             if self.flow.state == RAPID_BUY:
                 self.stop_event.wait(0.01)
+            elif self.flow.state in (
+                SELECT_YEAR, SELECT_QTY, WAIT_TIME
+            ):
+                self.stop_event.wait(0.02)
             else:
                 self.stop_event.wait(TICK_INTERVAL)
 
@@ -241,6 +254,7 @@ class IMtAssistantApp(App):
     # ---------------- 定时武装（先校验卡密）----------------
     def _arm_schedule(self, target):
         """真正武装流程（卡密校验通过后调用）"""
+        self.flow.year_target = self.screen.get_year_text()
         self.flow.reset(target)
         self.status_store.mark_start(
             target.strftime(u"%H:%M:%S"),
@@ -248,6 +262,7 @@ class IMtAssistantApp(App):
         )
         self.flow.on_popup_success = self._on_popup_success
         self.app_logger.log(u"设备标识：%s" % self.screen.get_device_code())
+        self.app_logger.log(u"选择年份：%s" % self.flow.year_target)
 
         self.flow_worker = FlowWorker(self.flow, self.app_logger)
         self.flow_worker.start()
@@ -316,6 +331,7 @@ class IMtAssistantApp(App):
         def armed():
             # 立即开始导航（不再等整点），整点等待由状态机读到按钮
             # 时间后在 WAIT_TIME 状态完成
+            self.flow.year_target = self.screen.get_year_text()
             self.flow.reset(datetime.now())
             self.status_store.mark_start(
                 target.strftime(u"%H:%M:00"),
@@ -325,6 +341,7 @@ class IMtAssistantApp(App):
             self.app_logger.log(
                 u"设备标识：%s" % self.screen.get_device_code()
             )
+            self.app_logger.log(u"选择年份：%s" % self.flow.year_target)
             self.app_logger.log(
                 u"已提前武装，目标场次整点 %s"
                 % target.strftime(u"%Y-%m-%d %H:%M:%S")
