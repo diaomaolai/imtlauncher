@@ -607,8 +607,9 @@ public class MtA11yService extends AccessibilityService {
         }
         final CountDownLatch latch = new CountDownLatch(1);
         final boolean[] result = new boolean[]{false};
-        boolean scheduled = takeScreenshot(Display.DEFAULT_DISPLAY,
-                getMainExecutor(), new TakeScreenshotCallback() {
+        try {
+            takeScreenshot(Display.DEFAULT_DISPLAY,
+                    getMainExecutor(), new TakeScreenshotCallback() {
                     @Override
                     public void onSuccess(ScreenshotResult screenshot) {
                         FileOutputStream fos = null;
@@ -647,7 +648,8 @@ public class MtA11yService extends AccessibilityService {
                         latch.countDown();
                     }
                 });
-        if (!scheduled) {
+        } catch (Exception e) {
+            // 截图调度失败（如显示不可用、状态异常）
             return false;
         }
         try {
