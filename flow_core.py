@@ -74,6 +74,7 @@ from config import (
     QTY_REGEX,
     QTY_MAX_TAPS,
     rapid_burst_count,
+    RUNTIME_STALL_RECAL_SECONDS,
 )
 
 # 状态
@@ -95,6 +96,9 @@ class FlowCore(object):
     def __init__(self, bridge, logger=None):
         self.bridge = bridge
         self.logger = logger
+        # 设备档案（自动校准生成）：运行时以实时节点树为主，
+        # 档案 bounds 作为兜底；由主程序武装前注入。
+        self.profile = None
         self.first_target = None
         self.session_target = None
         self.display_target = None
@@ -109,6 +113,9 @@ class FlowCore(object):
         self._stable_count = 0
         self._buy_verified = False
         self._soldout_pending = False
+        # 节点对不上停滞检测：同一状态累计找不到控件的秒数
+        self._stall_seconds = 0.0
+        self.needs_recalibration = False
         # 连点模式：点击计数 + 等待/连点轮次状态
         self._rapid_click_count = 0
         self._rapid_phase = u"wait"     # wait：随机等待；burst：连续点击
@@ -132,6 +139,57 @@ class FlowCore(object):
         else:
             print(message)
 
+    # ---------------- 档案 bounds 兜底 ----------------
+    def _profile_controls(self):
+        if self.profile is None:
+            return {}
+        return self.profile.controls or {}
+
+    def _profile_record(self, control_key, sub_key=None):
+        controls = self._profile_controls()
+        if sub_key is None:
+            record = controls.get(control_key)
+        else:
+            group = controls.get(control_key)
+            record = group.get(sub_key) if isinstance(group, dict) else None
+        return record if isinstance(record, dict) else None
+
+    def _profile_bounds(self, control_key, sub_key=None):
+        record = self._profile_record(control_key, sub_key)
+        if record is None:
+            return None
+        bounds = record.get(u"bounds")
+        if not bounds or len(bounds) != 4:
+            return None
+        return tuple(int(v) for v in bounds)
+
+    def _profile_center(self, control_key, sub_key=None):
+        record = self._profile_record(control_key, sub_key)
+        if record is None:
+            return None
+        center = record.get(u"center")
+        if not center or len(center) != 2:
+            return None
+        return int(center[0]), int(center[1])
+
+    def _region(self, control_key, legacy_region, sub_key=None):
+        """
+        实时节点树查询区域：档案 bounds 优先（非 OPPO 机型），
+        无档案或字段缺失时退回固定 px 区域。
+        区域内扫描的仍是实时节点，不是静态截图。
+        """
+        return self._profile_bounds(control_key, sub_key) or legacy_region
+
+    def _button_region(self):
+        return self._region(u"action_button", BUTTON_REGION_PX)
+
+    def _tick_stall(self, dt):
+        """等待分支累计停滞；超阈值请求自动重校"""
+        self._stall_seconds += dt
+        if self._stall_seconds >= RUNTIME_STALL_RECAL_SECONDS:
+            self.needs_recalibration = True
+            self._log(u"节点持续对不上，请求自动重新校准")
+
     # ---------------- 生命周期 ----------------
     def reset(self, first_target):
         """武装流程，first_target 为首次触发整点"""
@@ -149,6 +207,8 @@ class FlowCore(object):
         self._stable_count = 0
         self._buy_verified = False
         self._soldout_pending = False
+        self._stall_seconds = 0.0
+        self.needs_recalibration = False
         self._rapid_click_count = 0
         self._rapid_phase = u"wait"
         self._rapid_wait_left = 0.0
@@ -208,6 +268,7 @@ class FlowCore(object):
         self._rapid_burst_left = 0
         self._rapid_rounds = 0
         self._qty_taps = 0
+        self._stall_seconds = 0.0
         # 注意：_soldout_pending 不在此重置，售罄复核要跨 ENTER→READ 保留
 
     def _heartbeat_log(self, dt, message):
@@ -263,15 +324,19 @@ class FlowCore(object):
             return
 
         # 第一步：点 i购；第二步：点经典
+        # 区域档案 bounds 优先，无档案退回 OPPO 固定 px
         if not self._nav_jd_clicked:
+            jd_region = self._region(
+                u"jingdian_tab", JINGDIAN_TAB_REGION_PX
+            )
             if self.bridge.text_exists_in_px_region(
-                JINGDIAN_TAB_TEXT, JINGDIAN_TAB_REGION_PX
+                JINGDIAN_TAB_TEXT, jd_region
             ):
                 self._log(
                     u"已在 i购，区域内识别到「经典」，点击经典"
                 )
                 if self.bridge.click_text_in_px_region(
-                    JINGDIAN_TAB_TEXT, JINGDIAN_TAB_REGION_PX
+                    JINGDIAN_TAB_TEXT, jd_region
                 ):
                     self._nav_jd_clicked = True
                     self.status = u"已点击经典，等待商品列表…"
@@ -280,14 +345,17 @@ class FlowCore(object):
                 return
 
             if not self._nav_igou_clicked:
+                igou_region = self._region(
+                    u"igou_tab", IGOU_TAB_REGION_PX
+                )
                 if self.bridge.text_exists_in_px_region(
-                    IGOU_TAB_TEXT, IGOU_TAB_REGION_PX
+                    IGOU_TAB_TEXT, igou_region
                 ):
                     self._log(
                         u"首页底部区域内识别到「i购」，点击 i购"
                     )
                     if self.bridge.click_text_in_px_region(
-                        IGOU_TAB_TEXT, IGOU_TAB_REGION_PX
+                        IGOU_TAB_TEXT, igou_region
                     ):
                         self._nav_igou_clicked = True
                         self.status = u"已点击 i购，等待页面加载…"
@@ -299,6 +367,7 @@ class FlowCore(object):
             self._heartbeat_log(
                 dt, u"等待 i茅台加载（寻找 i购/经典）…"
             )
+            self._tick_stall(dt)
             self.status = u"等待 i茅台页面加载…"
             return
 
@@ -345,6 +414,7 @@ class FlowCore(object):
         self._heartbeat_log(
             dt, u"未确认在商品列表（弹窗/详情页），继续等待…"
         )
+        self._tick_stall(dt)
         self.status = u"等待商品列表页…"
 
     # ---------------- SELECT_YEAR ----------------
@@ -364,10 +434,12 @@ class FlowCore(object):
             return
 
         year = self.year_target or YEAR_TARGET_TEXT
-        # UI 选了未知年份时退回默认年份的识别框
-        region = YEAR_CELL_REGION_PX.get(
+        # UI 选了未知年份时退回默认年份的识别框；
+        # 档案年份格 bounds 优先，无档案退回固定 px
+        legacy_region = YEAR_CELL_REGION_PX.get(
             year, YEAR_CELL_REGION_PX[YEAR_TARGET_TEXT]
         )
+        region = self._region(u"year_cells", legacy_region, sub_key=year)
 
         # 1) 该年份格区域内识别到目标年份 → 点击一次，进入数量修改
         if self.bridge.text_exists_in_px_region(year, region):
@@ -380,13 +452,14 @@ class FlowCore(object):
 
         # 2) 兜底：年份区域缺失但抢购按钮已渲染，
         #    仍尝试数量修改（数量状态有自己的兜底），再识别按钮
+        button_region = self._button_region()
         button_ready = self.bridge.find_regex_in_px_region(
-            SALE_TIME_REGEX, BUTTON_REGION_PX
+            SALE_TIME_REGEX, button_region
         )
         for texts in (BUY_NOW_TEXTS, SOLD_OUT_TEXTS):
             for t in texts:
                 if self.bridge.text_exists_in_px_region(
-                    t, BUTTON_REGION_PX
+                    t, button_region
                 ):
                     button_ready = True
                     break
@@ -402,20 +475,20 @@ class FlowCore(object):
             dt,
             u"等待详情页年份规格区域渲染（年份「%s」）…" % year,
         )
+        self._tick_stall(dt)
         self.status = u"等待详情页年份规格区域…"
 
     # ---------------- SELECT_QTY ----------------
     def _button_ready(self):
         """抢购按钮区是否已出现可识别内容（时间/立即抢购/售罄）"""
+        region = self._button_region()
         if self.bridge.find_regex_in_px_region(
-            SALE_TIME_REGEX, BUTTON_REGION_PX
+            SALE_TIME_REGEX, region
         ):
             return True
         for texts in (BUY_NOW_TEXTS, SOLD_OUT_TEXTS):
             for t in texts:
-                if self.bridge.text_exists_in_px_region(
-                    t, BUTTON_REGION_PX
-                ):
+                if self.bridge.text_exists_in_px_region(t, region):
                     return True
         return False
 
@@ -435,8 +508,11 @@ class FlowCore(object):
             )
             return
 
+        value_region = self._region(
+            u"qty_value", QTY_VALUE_REGION_PX
+        )
         hits = self.bridge.find_regex_in_px_region(
-            QTY_REGEX, QTY_VALUE_REGION_PX
+            QTY_REGEX, value_region
         )
         value = None
         if hits:
@@ -461,8 +537,11 @@ class FlowCore(object):
                 )
                 self._goto(READ_DETAIL, u"数量修改异常，识别抢购按钮…")
                 return
-            # 同一拍内连续点完需要的次数（加号节点无文字，固定坐标）
-            px, py = QTY_PLUS_CENTER_PX
+            # 同一拍内连续点完需要的次数（加号节点无文字）：
+            # 档案加号中心优先，无档案退回 OPPO 固定中心
+            plus_center = self._profile_center(u"qty_plus") \
+                or QTY_PLUS_CENTER_PX
+            px, py = plus_center
             for _ in range(need):
                 if self._qty_taps >= QTY_MAX_TAPS:
                     break
@@ -486,6 +565,7 @@ class FlowCore(object):
         self._heartbeat_log(
             dt, u"等待详情页数量区域渲染…"
         )
+        self._tick_stall(dt)
         self.status = u"等待详情页数量区域…"
 
     # ---------------- READ_DETAIL ----------------
@@ -533,9 +613,9 @@ class FlowCore(object):
             self._goto(ENTER_PRODUCT, u"售罄复核，重新进入确认…")
             return
 
-        # 3) 开售时间（右下角区域）
+        # 3) 开售时间（按钮区域，档案 bounds 优先）
         hits = self.bridge.find_regex_in_px_region(
-            SALE_TIME_REGEX, BUTTON_REGION_PX
+            SALE_TIME_REGEX, self._button_region()
         )
         if hits:
             hhmm = hits[0]
@@ -591,6 +671,7 @@ class FlowCore(object):
             dt,
             u"详情页等待按钮刷新/弹窗消失（不做任何点击）…",
         )
+        self._tick_stall(dt)
         self.status = u"详情页等待按钮刷新…"
 
     # ---------------- RAPID_BUY ----------------
@@ -643,7 +724,7 @@ class FlowCore(object):
             if self._rapid_wait_left > 0.0:
                 # 等待期间按钮若已变为开售时间，交回 READ
                 hits = self.bridge.find_regex_in_px_region(
-                    SALE_TIME_REGEX, BUTTON_REGION_PX
+                    SALE_TIME_REGEX, self._button_region()
                 )
                 if hits:
                     self._log(
@@ -698,7 +779,7 @@ class FlowCore(object):
         # 5) 找不到按钮：弹窗遮挡则继续；变成开售时间则交回 READ
         if not clicked:
             hits = self.bridge.find_regex_in_px_region(
-                SALE_TIME_REGEX, BUTTON_REGION_PX
+                SALE_TIME_REGEX, self._button_region()
             )
             if hits:
                 self._log(

@@ -2,6 +2,7 @@ package org.personal.imtlauncher;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
+import android.graphics.Bitmap;
 import android.graphics.Path;
 import android.graphics.Rect;
 import android.os.Build;
@@ -11,6 +12,12 @@ import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.File;
+import java.io.FileOutputStream;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -513,6 +520,148 @@ public class MtA11yService extends AccessibilityService {
     /** 全局返回 */
     public boolean globalBack() {
         return performGlobalAction(GLOBAL_ACTION_BACK);
+    }
+
+    // ------------------------------------------------------------------
+    // 设备校准：全量节点 dump 与截图
+    // ------------------------------------------------------------------
+
+    /**
+     * 全量节点树 dump，返回 JSON 字符串。
+     *
+     * 结构：[{"window":窗口序号,
+     *        "nodes":[{"i":窗内索引,"p":父索引(-1为根),"c":类名,
+     *                 "id":viewId资源名,"t":文字,"d":contentDescription,
+     *                 "ck":可点击,"sc":可滚动,"b":[l,t,r,b]}]}]
+     *
+     * 遍历采用显式栈，避免深树递归栈溢出；父索引让 Python 侧可沿
+     * 父链定位 0x0 文字节点的真实尺寸祖先。
+     */
+    public String dumpNodesJson() {
+        JSONArray windows = new JSONArray();
+        List<AccessibilityNodeInfo> roots = roots();
+        int winIndex = 0;
+        for (AccessibilityNodeInfo root : roots) {
+            JSONArray nodes = new JSONArray();
+            // 栈元素：{节点, 父索引}
+            List<AccessibilityNodeInfo> stackNodes = new ArrayList<>();
+            List<Integer> stackParents = new ArrayList<>();
+            stackNodes.add(root);
+            stackParents.add(-1);
+            while (!stackNodes.isEmpty()) {
+                AccessibilityNodeInfo node =
+                        stackNodes.remove(stackNodes.size() - 1);
+                int parent = stackParents.remove(stackParents.size() - 1);
+                int idx = nodes.length();
+                try {
+                    JSONObject obj = new JSONObject();
+                    obj.put("i", idx);
+                    obj.put("p", parent);
+                    obj.put("c", safeChar(node.getClassName()));
+                    obj.put("id", safeChar(node.getViewIdResourceName()));
+                    obj.put("t", safeChar(node.getText()));
+                    obj.put("d", safeChar(node.getContentDescription()));
+                    obj.put("ck", node.isClickable());
+                    obj.put("sc", node.isScrollable());
+                    Rect rect = new Rect();
+                    node.getBoundsInScreen(rect);
+                    JSONArray bounds = new JSONArray();
+                    bounds.put(rect.left);
+                    bounds.put(rect.top);
+                    bounds.put(rect.right);
+                    bounds.put(rect.bottom);
+                    obj.put("b", bounds);
+                    nodes.put(obj);
+                } catch (Exception ignored) {
+                    // 单个节点序列化失败不影响整树
+                }
+                int childCount = node.getChildCount();
+                for (int k = childCount - 1; k >= 0; k--) {
+                    AccessibilityNodeInfo child = node.getChild(k);
+                    if (child != null) {
+                        stackNodes.add(child);
+                        stackParents.add(idx);
+                    }
+                }
+            }
+            try {
+                JSONObject win = new JSONObject();
+                win.put("window", winIndex);
+                win.put("nodes", nodes);
+                windows.put(win);
+            } catch (Exception ignored) {
+            }
+            winIndex++;
+        }
+        return windows.toString();
+    }
+
+    /**
+     * 截取当前屏幕并以 PNG 写入指定路径（同步，最多等待 5 秒）。
+     * 仅 Android 11（API 30）及以上支持，低版本直接返回 false。
+     * 父目录不存在时自动创建。
+     */
+    public boolean takeScreenshotToFile(final String path) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return false;
+        }
+        final CountDownLatch latch = new CountDownLatch(1);
+        final boolean[] result = new boolean[]{false};
+        boolean scheduled = takeScreenshot(Display.DEFAULT_DISPLAY,
+                getMainExecutor(), new TakeScreenshotCallback() {
+                    @Override
+                    public void onSuccess(ScreenshotResult screenshot) {
+                        FileOutputStream fos = null;
+                        try {
+                            Bitmap bitmap = Bitmap.wrapHardwareBuffer(
+                                    screenshot.getHardwareBuffer(),
+                                    screenshot.getColorSpace());
+                            if (bitmap == null) {
+                                latch.countDown();
+                                return;
+                            }
+                            File file = new File(path);
+                            File parent = file.getParentFile();
+                            if (parent != null && !parent.exists()) {
+                                parent.mkdirs();
+                            }
+                            fos = new FileOutputStream(file);
+                            bitmap.compress(
+                                    Bitmap.CompressFormat.PNG, 100, fos);
+                            result[0] = true;
+                        } catch (Exception e) {
+                            result[0] = false;
+                        } finally {
+                            if (fos != null) {
+                                try {
+                                    fos.close();
+                                } catch (Exception ignored) {
+                                }
+                            }
+                            latch.countDown();
+                        }
+                    }
+
+                    @Override
+                    public void onFailure(int errorCode) {
+                        latch.countDown();
+                    }
+                });
+        if (!scheduled) {
+            return false;
+        }
+        try {
+            if (!latch.await(5, TimeUnit.SECONDS)) {
+                return false;
+            }
+        } catch (InterruptedException e) {
+            return false;
+        }
+        return result[0];
+    }
+
+    private static String safeChar(CharSequence value) {
+        return value == null ? "" : value.toString();
     }
 
     // ------------------------------------------------------------------

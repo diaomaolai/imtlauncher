@@ -107,6 +107,20 @@ TAP_JITTER_PX = 6
 # 主循环间隔（秒）
 TICK_INTERVAL = 0.3
 
+# ---------------- 自动校准（首次武装建档） ----------------
+# 每个阶段等待目标页面出现的最长秒数
+CALIBRATION_STAGE_TIMEOUT = 20.0
+# 校准轮询节拍（动态等待，不做固定 sleep）
+CALIBRATION_POLL_INTERVAL = 0.3
+# 点击后未进入下一页面时，同阶段最多补点次数
+CALIBRATION_MAX_CLICK_RETRIES = 2
+# 截图目录名（位于 profiles/ 下）
+CALIBRATION_SHOT_DIR_NAME = u"calibration_shots"
+
+# 运行时停滞重校：已连接但同一状态持续找不到应有节点超过该秒数，
+# 判定节点对不上（页面改版/档案失效），自动重新校准
+RUNTIME_STALL_RECAL_SECONDS = 60.0
+
 # ---------------- 启动后导航（i购 → 经典）----------------
 # 拉起 i茅台后先做区域限定识别点击：首页底部点「i购」→
 # i购页子标签点「经典」，进入经典列表后才开始识别飞天商品。

@@ -17,6 +17,8 @@
 """
 
 # pyjnius 只存在于 python-for-android 打包后的安卓环境
+import json
+
 try:
     from jnius import autoclass
     _ANDROID = True
@@ -160,6 +162,45 @@ class A11yBridge(object):
             return [str(item) for item in result]
         except Exception:
             return []
+
+    # ---------------- 全量节点 dump（校准用） ----------------
+    def dump_nodes(self):
+        """
+        全量节点树 dump，返回扁平节点列表，每个节点含：
+        window/i/p/c/id/t/d/ck/sc/b（b 为 [l,t,r,b] 绝对像素）。
+        取不到节点时返回空列表。
+        """
+        service = self._service_or_none()
+        if service is None:
+            return []
+        try:
+            raw = service.dumpNodesJson()
+            data = json.loads(str(raw))
+        except Exception:
+            return []
+        nodes = []
+        try:
+            for window in data:
+                win_index = int(window.get(u"window", 0))
+                for node in window.get(u"nodes", []):
+                    node[u"window"] = win_index
+                    nodes.append(node)
+        except Exception:
+            return nodes
+        return nodes
+
+    def save_screenshot(self, path):
+        """
+        截取当前屏幕以 PNG 写入指定路径（API 30+），
+        成功返回 True；低版本或失败返回 False。
+        """
+        service = self._service_or_none()
+        if service is None:
+            return False
+        try:
+            return bool(service.takeScreenshotToFile(path))
+        except Exception:
+            return False
 
     # ---------------- 手势点击 ----------------
     def tap_px(self, x, y, jitter_px=6):

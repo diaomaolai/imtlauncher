@@ -37,6 +37,8 @@ from app_ui import MainScreen
 from status_reporter import StatusStore
 import card_client
 from slot_monitor import SlotMonitor
+from device_profile import ProfileStore, build_fingerprint
+from calibration import DeviceCalibrator
 
 
 class FlowWorker(threading.Thread):
@@ -48,10 +50,11 @@ class FlowWorker(threading.Thread):
     线程以固定间隔推进状态机。
     """
 
-    def __init__(self, flow, logger=None):
+    def __init__(self, flow, logger=None, recal_fn=None):
         super(FlowWorker, self).__init__(daemon=True)
         self.flow = flow
         self.logger = logger
+        self.recal_fn = recal_fn
         self.stop_event = threading.Event()
 
     def stop(self):
@@ -71,6 +74,15 @@ class FlowWorker(threading.Thread):
                     self.logger.log(u"流程推进异常: %s" % exc)
                 else:
                     print(u"流程推进异常: %s" % exc)
+
+            # 节点持续对不上：停掉本线程，交主程序重新校准再武装
+            if self.flow.needs_recalibration \
+                    and callable(self.recal_fn):
+                self.stop_event.set()
+                Clock.schedule_once(
+                    lambda _dt: self.recal_fn()
+                )
+                return
 
             # 主动释放本线程上附着的 JNI 环境
             try:
@@ -94,6 +106,30 @@ class FlowWorker(threading.Thread):
                 self.stop_event.wait(TICK_INTERVAL)
 
 
+class CalibrationWorker(threading.Thread):
+    """
+    自动校准工作线程：跑导航链采集节点 bounds 与截图，
+    结束后把结果切回 Kivy 主线程处理。
+    """
+
+    def __init__(self, calibrator, on_done):
+        super(CalibrationWorker, self).__init__(daemon=True)
+        self.calibrator = calibrator
+        self.on_done = on_done
+
+    def run(self):
+        try:
+            ok, result = self.calibrator.run()
+        except Exception as exc:
+            ok, result = False, str(exc)
+        try:
+            from jnius import detach
+            detach()
+        except Exception:
+            pass
+        Clock.schedule_once(lambda _dt: self.on_done(ok, result))
+
+
 class IMtAssistantApp(App):
     """Kivy 应用主类"""
 
@@ -106,6 +142,8 @@ class IMtAssistantApp(App):
         self.flow = FlowCore(self.bridge, self.app_logger)
         self.flow_worker = None
         self.status_store = StatusStore()
+        self.profile_store = ProfileStore(logger=self.app_logger)
+        self.calibration_worker = None
         self.card_unlocked = False
 
         # 界面
@@ -139,6 +177,44 @@ class IMtAssistantApp(App):
             self.flow_worker is not None
             and not self.flow.is_done
         )
+
+    # ---------------- 自动校准触发 ----------------
+    def _ensure_profile(self, after_fn):
+        """
+        武装前检查本地档案：匹配则直接加载；缺失或 i茅台版本变化
+        则自动校准（不抢购），成功后再执行 after_fn 武装流程。
+        """
+        try:
+            fingerprint, _m, _pkg = build_fingerprint()
+        except Exception:
+            fingerprint = {}
+        profile = self.profile_store.find_matching(fingerprint)
+        if profile is not None:
+            self.flow.profile = profile
+            self.app_logger.log(u"已加载匹配设备档案，跳过校准")
+            after_fn()
+            return
+
+        self.screen.set_status(u"首次运行，设备校准中（不抢购）…")
+        self.screen.schedule_btn.disabled = True
+        calibrator = DeviceCalibrator(
+            self.bridge, self.profile_store, self.app_logger
+        )
+
+        def on_done(ok, result):
+            if ok:
+                self.flow.profile = result
+                self.screen.set_status(u"设备校准完成，继续武装")
+                self.app_logger.log(u"校准成功，继续武装流程")
+                after_fn()
+                return
+            self.screen.set_login_button_busy(False)
+            self.screen.schedule_btn.disabled = False
+            self.screen.set_status(u"设备校准失败：%s" % result)
+            self.app_logger.log(u"设备校准失败：%s" % result)
+
+        self.calibration_worker = CalibrationWorker(calibrator, on_done)
+        self.calibration_worker.start()
 
     # ---------------- 卡密登录 ----------------
     def _on_login_pressed(self, instance):
@@ -264,7 +340,10 @@ class IMtAssistantApp(App):
         self.app_logger.log(u"设备标识：%s" % self.screen.get_device_code())
         self.app_logger.log(u"选择年份：%s" % self.flow.year_target)
 
-        self.flow_worker = FlowWorker(self.flow, self.app_logger)
+        self.flow_worker = FlowWorker(
+            self.flow, self.app_logger,
+            recal_fn=self._on_runtime_recal_requested,
+        )
         self.flow_worker.start()
         self.screen.set_schedule_button_armed(True)
         self.screen.set_status(
@@ -312,7 +391,9 @@ class IMtAssistantApp(App):
                 self._ui(fail)
                 return
             self.app_logger.log(u"定时前卡密校验通过")
-            self._ui(lambda: self._arm_schedule(target))
+            self._ui(lambda: self._ensure_profile(
+                lambda: self._arm_schedule(target)
+            ))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -328,7 +409,7 @@ class IMtAssistantApp(App):
             self.flow_worker.stop()
             self.flow_worker = None
 
-        def armed():
+        def do_arm():
             # 立即开始导航（不再等整点），整点等待由状态机读到按钮
             # 时间后在 WAIT_TIME 状态完成
             self.flow.year_target = self.screen.get_year_text()
@@ -347,14 +428,45 @@ class IMtAssistantApp(App):
                 % target.strftime(u"%Y-%m-%d %H:%M:%S")
             )
 
-            self.flow_worker = FlowWorker(self.flow, self.app_logger)
+            self.flow_worker = FlowWorker(
+                self.flow, self.app_logger,
+                recal_fn=self._on_runtime_recal_requested,
+            )
             self.flow_worker.start()
             self.screen.set_schedule_button_armed(True)
             self.screen.set_status(
                 u"场次提前自启动，目标 %s"
                 % target.strftime(u"%H:%M:%S")
             )
-        self._ui(armed)
+        # 首次武装同样先校准建档，档案存在则直接武装
+        self._ui(lambda: self._ensure_profile(do_arm))
+
+    def _on_runtime_recal_requested(self):
+        """
+        运行时节点对不上（停滞阈值触发）：停掉旧流程，重新走校准链
+        生成新档案，再按原目标场次重新武装；原目标已过则立即开始。
+        """
+        if self.flow_worker is not None:
+            self.flow_worker.stop()
+            self.flow_worker = None
+        self.screen.set_status(u"节点对不上，自动重新校准中…")
+        self.app_logger.log(u"运行时节点对不上，开始自动重新校准")
+        calibrator = DeviceCalibrator(
+            self.bridge, self.profile_store, self.app_logger
+        )
+
+        def on_done(ok, result):
+            if not ok:
+                self.screen.set_status(u"重新校准失败：%s" % result)
+                self.app_logger.log(u"运行时重新校准失败：%s" % result)
+                return
+            self.flow.profile = result
+            self.app_logger.log(u"运行时重新校准完成，重新武装")
+            target = self.flow.first_target or datetime.now()
+            self._arm_schedule(target)
+
+        self.calibration_worker = CalibrationWorker(calibrator, on_done)
+        self.calibration_worker.start()
 
     def _disarm(self, status_text=None):
         """取消定时并恢复界面"""
