@@ -24,6 +24,7 @@ from kivy.clock import Clock
 from config import APP_TITLE, TICK_INTERVAL
 from font_setup import register_cjk_font
 from a11y_bridge import A11yBridge
+from android_launcher import launch_moutai
 from flow_core import (
     FlowCore,
     RAPID_BUY,
@@ -76,13 +77,12 @@ class FlowWorker(threading.Thread):
                 else:
                     print(u"流程推进异常: %s" % exc)
 
-            # 节点持续对不上：停掉本线程，交主程序重新校准再武装
+            # 节点持续对不上：停掉本线程，直接在工作线程交主程序重新
+            # 校准再武装（不依赖 Clock，后台 Clock 暂停也能执行）
             if self.flow.needs_recalibration \
                     and callable(self.recal_fn):
                 self.stop_event.set()
-                Clock.schedule_once(
-                    lambda _dt: self.recal_fn()
-                )
+                self.recal_fn()
                 return
 
             # 主动释放本线程上附着的 JNI 环境
@@ -110,7 +110,8 @@ class FlowWorker(threading.Thread):
 class CalibrationWorker(threading.Thread):
     """
     自动校准工作线程：跑导航链采集节点 bounds 与截图，
-    结束后把结果切回 Kivy 主线程处理。
+    结束后在本工作线程直接回调 on_done；回调内的 UI 操作自行通过
+    Clock 切回主线程，保证后台 Clock 暂停时校准武装不被挂起。
     """
 
     def __init__(self, calibrator, on_done):
@@ -128,7 +129,7 @@ class CalibrationWorker(threading.Thread):
             detach()
         except Exception:
             pass
-        Clock.schedule_once(lambda _dt: self.on_done(ok, result))
+        self.on_done(ok, result)
 
 
 class IMtAssistantApp(App):
@@ -205,22 +206,30 @@ class IMtAssistantApp(App):
             after_fn()
             return
 
-        self.screen.set_status(u"首次运行，设备校准中（不抢购）…")
-        self.screen.schedule_btn.disabled = True
+        self._ui(lambda: self.screen.set_status(
+            u"首次运行，设备校准中（不抢购）…"))
+        self._ui(lambda: setattr(
+            self.screen.schedule_btn, u"disabled", True))
         calibrator = DeviceCalibrator(
             self.bridge, self.profile_store, self.app_logger
         )
 
         def on_done(ok, result):
+            # 本回调在 CalibrationWorker 工作线程执行
             if ok:
                 self.flow.profile = result
-                self.screen.set_status(u"设备校准完成，继续武装")
+                self._ui(lambda: self.screen.set_status(
+                    u"设备校准完成，继续武装"))
                 self.app_logger.log(u"校准成功，继续武装流程")
                 after_fn()
                 return
-            self.screen.set_login_button_busy(False)
-            self.screen.schedule_btn.disabled = False
-            self.screen.set_status(u"设备校准失败：%s" % result)
+
+            def fail_ui():
+                self.screen.set_login_button_busy(False)
+                self.screen.schedule_btn.disabled = False
+                self.screen.set_status(u"设备校准失败：%s" % result)
+
+            self._ui(fail_ui)
             self.app_logger.log(u"设备校准失败：%s" % result)
 
         self.calibration_worker = CalibrationWorker(calibrator, on_done)
@@ -340,27 +349,38 @@ class IMtAssistantApp(App):
         threading.Thread(target=work, daemon=True).start()
 
     # ---------------- 定时武装（先校验卡密）----------------
-    def _arm_schedule(self, target):
-        """真正武装流程（卡密校验通过后调用）"""
+    def _arm_flow(self, target, scheduled_text):
+        """
+        统一武装核心（可在普通线程安全调用，手动/自启动共用）：
+        1) 立即拉起 i茅台，保证它在前台（幂等，已在前台无副作用）；
+        2) reset(now) 让状态机当场开始 i购→经典→详情导航，读到未来
+           投放时间后返回列表 WAIT 到整点，到点再点记录位置进入；
+        3) 界面更新单独走 Clock，延迟或丢失不影响武装本身。
+        """
+        card = self.screen.get_card_key()
         self.flow.year_target = self.screen.get_year_text()
-        self.flow.reset(target)
-        self.status_store.mark_start(
-            target.strftime(u"%H:%M:%S"),
-            self.screen.get_card_key(),
-        )
+        self.flow.reset(datetime.now())
+        self.status_store.mark_start(scheduled_text, card)
         self.flow.on_popup_success = self._on_popup_success
         self.app_logger.log(u"设备标识：%s" % self.screen.get_device_code())
         self.app_logger.log(u"选择年份：%s" % self.flow.year_target)
+
+        # 保证 i茅台 在前台，这是旧版手动定时缺失的关键一步
+        launch_moutai(self.app_logger)
 
         self.flow_worker = FlowWorker(
             self.flow, self.app_logger,
             recal_fn=self._on_runtime_recal_requested,
         )
         self.flow_worker.start()
-        self.screen.set_schedule_button_armed(True)
-        self.screen.set_status(
-            u"已设定：%s" % target.strftime(u"%Y-%m-%d %H:%M:%S")
-        )
+
+        self._ui(lambda: self.screen.set_schedule_button_armed(True))
+        self._ui(lambda: self.screen.set_status(
+            u"已武装，已拉起 i茅台，自动导航到详情，到点抢购"))
+
+    def _arm_schedule(self, target):
+        """手动定时武装（卡密校验通过后，工作线程调用）"""
+        self._arm_flow(target, target.strftime(u"%H:%M:%S"))
 
     def _on_schedule_pressed(self, instance):
         """设置定时 / 取消定时 按钮回调"""
@@ -403,55 +423,29 @@ class IMtAssistantApp(App):
                 self._ui(fail)
                 return
             self.app_logger.log(u"定时前卡密校验通过")
-            self._ui(lambda: self._ensure_profile(
+            # 直接在工作线程执行（不依赖 Clock，后台 Clock 暂停也能武装）
+            self._ensure_profile(
                 lambda: self._arm_schedule(target)
-            ))
+            )
 
         threading.Thread(target=work, daemon=True).start()
 
     def _auto_arm(self, target):
         """
-        场次提前 3 分钟自启动武装（slot_monitor 线程调用，
-        传入的 target 为场次整点本身）：
-        先停旧流程，再立即武装（reset 用当前时刻，使状态机当场开始
-        i购→经典→进详情导航）；读到未来场次时间后状态机返回列表
-        WAIT 到整点。上报记录的 scheduled_time 仍写场次整点。
+        场次提前自启动武装（slot_monitor 线程调用，target 为场次整点）。
+        先停旧流程，再在本线程直接校准建档/武装，统一走 _arm_flow：
+        立即拉起 i茅台 + 当场导航，读到未来时间后 WAIT 到整点，
+        上报记录的 scheduled_time 写场次整点。
         """
         if self.flow_worker is not None:
             self.flow_worker.stop()
             self.flow_worker = None
 
-        def do_arm():
-            # 立即开始导航（不再等整点），整点等待由状态机读到按钮
-            # 时间后在 WAIT_TIME 状态完成
-            self.flow.year_target = self.screen.get_year_text()
-            self.flow.reset(datetime.now())
-            self.status_store.mark_start(
-                target.strftime(u"%H:%M:00"),
-                self.screen.get_card_key(),
+        self._ensure_profile(
+            lambda: self._arm_flow(
+                target, target.strftime(u"%H:%M:00")
             )
-            self.flow.on_popup_success = self._on_popup_success
-            self.app_logger.log(
-                u"设备标识：%s" % self.screen.get_device_code()
-            )
-            self.app_logger.log(u"选择年份：%s" % self.flow.year_target)
-            self.app_logger.log(
-                u"已提前武装，目标场次整点 %s"
-                % target.strftime(u"%Y-%m-%d %H:%M:%S")
-            )
-
-            self.flow_worker = FlowWorker(
-                self.flow, self.app_logger,
-                recal_fn=self._on_runtime_recal_requested,
-            )
-            self.flow_worker.start()
-            self.screen.set_schedule_button_armed(True)
-            self.screen.set_status(
-                u"场次提前自启动，目标 %s"
-                % target.strftime(u"%H:%M:%S")
-            )
-        # 首次武装同样先校准建档，档案存在则直接武装
-        self._ui(lambda: self._ensure_profile(do_arm))
+        )
 
     def _on_runtime_recal_requested(self):
         """
@@ -461,15 +455,18 @@ class IMtAssistantApp(App):
         if self.flow_worker is not None:
             self.flow_worker.stop()
             self.flow_worker = None
-        self.screen.set_status(u"节点对不上，自动重新校准中…")
+        self._ui(lambda: self.screen.set_status(
+            u"节点对不上，自动重新校准中…"))
         self.app_logger.log(u"运行时节点对不上，开始自动重新校准")
         calibrator = DeviceCalibrator(
             self.bridge, self.profile_store, self.app_logger
         )
 
         def on_done(ok, result):
+            # 在 CalibrationWorker 工作线程执行
             if not ok:
-                self.screen.set_status(u"重新校准失败：%s" % result)
+                self._ui(lambda: self.screen.set_status(
+                    u"重新校准失败：%s" % result))
                 self.app_logger.log(u"运行时重新校准失败：%s" % result)
                 return
             self.flow.profile = result
@@ -490,25 +487,13 @@ class IMtAssistantApp(App):
         if status_text:
             self.screen.set_status(status_text)
 
-    def _close_android_activity(self):
-        """结束启动器 APP（已售罄分支）；电脑端不执行"""
-        try:
-            from jnius import autoclass
-            PythonActivity = autoclass(u"org.kivy.android.PythonActivity")
-            activity = PythonActivity.mActivity
-            if activity is not None:
-                activity.finish()
-        except Exception:
-            pass
-
     # ---------------- 界面刷新 ----------------
     def _tick(self, dt):
         if self.flow.is_done:
-            should_exit = self.flow.request_app_exit
+            # 不再 finish 杀进程：保留进程与监控守护线程盯后续场次，
+            # 退出由用户手动操作（request_app_exit 仅记录，不再执行）。
             self.screen.set_status(self.flow.status)
             self._disarm(self.flow.status)
-            if should_exit:
-                self._close_android_activity()
             return
         if self.flow_worker is None:
             return

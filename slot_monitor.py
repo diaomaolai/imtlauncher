@@ -7,14 +7,16 @@
   晚上：20:00 20:05 20:10 20:15 20:20 20:25
   每个时间节点提前 SLOT_LEAD_SECONDS（默认 180 秒，即 3 分钟）自启动。
 
-行为：
-- 每个场次的「提前触发时刻」（场次整点 - SLOT_LEAD_SECONDS）后
-  SLOT_FIRE_WINDOW_SECONDS 窗口内检查一次：
-  - 抢购流程已在运行 → 只记日志，跳过；
+行为（可补偿触发，不再依赖精确 3 秒窗口）：
+- 每个场次在「提前触发时刻」（场次整点 - SLOT_LEAD_SECONDS）之后、
+  「场次整点 + SLOT_GRACE_SECONDS 宽限」之前，任意一次轮询命中即
+  触发；线程被延迟也能在下一轮（0.5 秒）补触发，不再永久跳过：
+  - 抢购流程已在运行 → 仍拉起一次 i茅台（幂等，保证它在前台），
+    但不重复武装；
   - 未启动 → 自动拉起 i茅台，并回调主程序立即武装流程，
     状态机当场开始导航（i购→经典→进详情），读到未来场次时间
     （如 09:00投放）后返回列表 WAIT 整点，到点再点记录位置进入。
-- 同一场次当天只触发一次，不重复启动。
+- 同一场次当天只触发一次，不重复武装。
 - 总开关 ENABLE_SLOT_AUTOSTART=False 时本模块不产生任何动作。
 - 武装后流程先走 NAV 导航：区域识别点「i购」→ 点「经典」，
   经典列表出现飞天商品后才进入识别（见 flow_core.py）。
@@ -27,7 +29,7 @@ from config import (
     ENABLE_SLOT_AUTOSTART,
     MORNING_SLOTS,
     EVENING_SLOTS,
-    SLOT_FIRE_WINDOW_SECONDS,
+    SLOT_GRACE_SECONDS,
     SLOT_LEAD_SECONDS,
     SLOT_APP_LAUNCH_LOG,
 )
@@ -85,8 +87,14 @@ class SlotMonitor(threading.Thread):
             fire_target = slot_target - timedelta(
                 seconds=SLOT_LEAD_SECONDS
             )
-            delta = (now - fire_target).total_seconds()
-            if delta < 0 or delta > SLOT_FIRE_WINDOW_SECONDS:
+            # 可补偿区间：提前时刻已到，且未超过整点+宽限。
+            # 区间内任意一次轮询都能触发，延迟不导致永久跳过。
+            if now < fire_target:
+                continue
+            grace_end = slot_target + timedelta(
+                seconds=SLOT_GRACE_SECONDS
+            )
+            if now > grace_end:
                 continue
 
             key = (now.strftime(u"%Y-%m-%d"), hhmm)
@@ -100,10 +108,14 @@ class SlotMonitor(threading.Thread):
                 running = False
 
             if running:
+                # 流程在跑（可能是手动定时 IDLE 等待），仍保证
+                # i茅台 在前台，但不重复武装。
                 self._log(
-                    u"场次 %s 提前 %d 秒触发，流程已在运行，跳过自启动"
+                    u"场次 %s 提前 %d 秒触发，流程已在运行，确保 i茅台 "
+                    u"在前台，不重复武装"
                     % (hhmm, SLOT_LEAD_SECONDS)
                 )
+                launch_moutai(self.logger)
                 continue
 
             self._log(
