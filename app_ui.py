@@ -309,11 +309,14 @@ class MainScreen(BoxLayout):
         self.countdown_label.text = text
 
     def set_schedule_button_armed(self, armed):
-        """定时武装后按钮变为"取消定时"，取消后恢复"""
+        """定时武装后按钮变为"取消定时"，取消后恢复。
+        武装/取消后按钮必须可点：武装前校验与校准流程曾把按钮置灰，
+        这里统一重新启用，否则无法二次点击取消。"""
         self.schedule_btn.text = u"取消定时" if armed else u"设置定时"
         self.schedule_btn.background_color = (
             (0.55, 0.25, 0.25, 1) if armed else (0.15, 0.45, 0.25, 1)
         )
+        self.schedule_btn.disabled = False
 
     def set_status(self, text):
         """更新状态提示"""

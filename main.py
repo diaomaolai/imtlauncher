@@ -35,6 +35,7 @@ from scheduler import parse_target_time, format_remaining
 from app_logger import AppLogger
 from app_ui import MainScreen
 from status_reporter import StatusStore
+from card_store import CardStore
 import card_client
 from slot_monitor import SlotMonitor
 from device_profile import ProfileStore, build_fingerprint
@@ -144,12 +145,21 @@ class IMtAssistantApp(App):
         self.status_store = StatusStore()
         self.profile_store = ProfileStore(logger=self.app_logger)
         self.calibration_worker = None
+        self.card_store = CardStore()
         self.card_unlocked = False
 
         # 界面
         self.screen = MainScreen()
         self.screen.login_btn.bind(on_press=self._on_login_pressed)
         self.screen.schedule_btn.bind(on_press=self._on_schedule_pressed)
+
+        # 回填上次登录成功的卡密，大退重启后无需重新输入
+        saved_card = self.card_store.get()
+        if saved_card:
+            self.screen.card_input.text = saved_card
+            self.screen.set_status(
+                u"已填入上次使用的卡密，请点击卡密登录"
+            )
 
         # 界面刷新循环（只更新界面；流程推进在工作线程）
         Clock.schedule_interval(self._tick, TICK_INTERVAL)
@@ -256,6 +266,8 @@ class IMtAssistantApp(App):
 
             def done():
                 self.card_unlocked = True
+                # 登录成功后持久化卡密，重启自动回填
+                self.card_store.save(card)
                 self.screen.set_login_button_busy(False)
                 self.screen.set_unlocked(True)
                 self.slot_monitor.set_enabled(True)
