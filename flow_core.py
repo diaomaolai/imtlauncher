@@ -49,6 +49,8 @@
 全程通过 AppLogger 打印并写入 txt 日志。
 """
 
+from datetime import timedelta
+
 from config import (
     PRODUCT_KEYWORDS,
     BUTTON_REGION_PX,
@@ -75,6 +77,8 @@ from config import (
     QTY_MAX_TAPS,
     rapid_burst_count,
     RUNTIME_STALL_RECAL_SECONDS,
+    MANUAL_LAUNCH_LEAD_SECONDS,
+    PAGE_ENTRY_MAX_RETRIES,
 )
 
 # 状态
@@ -124,13 +128,17 @@ class FlowCore(object):
         self._rapid_rounds = 0
         # 数量修改：本拍/累计加号点击
         self._qty_taps = 0
-        # 导航阶段标记（只在每次运行开始时走一次）
-        self._nav_igou_clicked = False
-        self._nav_jd_clicked = False
         # 本次要选择的年份（UI 下拉菜单武装时写入；默认当前年份）
         self.year_target = YEAR_TARGET_TEXT
         # 弹窗确认成功回调（由 main 注入，用于状态上报置 1）
         self.on_popup_success = None
+        # 拉起 i茅台 回调（由 main 注入 launch_moutai），
+        # 状态机不直接依赖 android_launcher，便于单测
+        self.on_launch_app = None
+        # 计划拉起时刻（手动=目标-提前量；自启动=立即）
+        self.launch_target = None
+        # 任意页面接入：导航重试计数
+        self._page_entry_retries = 0
 
     # ---------------- 日志 ----------------
     def _log(self, message):
@@ -191,10 +199,22 @@ class FlowCore(object):
             self._log(u"节点持续对不上，请求自动重新校准")
 
     # ---------------- 生命周期 ----------------
-    def reset(self, first_target):
-        """武装流程，first_target 为首次触发整点"""
+    def reset(self, first_target, launch_target=None):
+        """武装流程。
+
+        first_target：开售整点（倒计时与抢购以此为准）；
+        launch_target：拉起 i茅台 的时刻；不传则按
+        MANUAL_LAUNCH_LEAD_SECONDS 在开售前提前拉起（手动定时），
+        自启动可显式传入立即拉起的时刻。
+        """
         self.first_target = first_target
+        if launch_target is None:
+            launch_target = first_target - timedelta(
+                seconds=MANUAL_LAUNCH_LEAD_SECONDS
+            )
+        self.launch_target = launch_target
         self.session_target = None
+        # 倒计时始终指向开售整点，IDLE 等待期即显示正确剩余时间
         self.display_target = first_target
         self.recorded_pos = None
         self.state = IDLE
@@ -215,11 +235,13 @@ class FlowCore(object):
         self._rapid_burst_left = 0
         self._rapid_rounds = 0
         self._qty_taps = 0
-        self._nav_igou_clicked = False
-        self._nav_jd_clicked = False
+        self._page_entry_retries = 0
         self._log(
-            u"已设置定时，首次触发时刻 %s"
-            % first_target.strftime(u"%Y-%m-%d %H:%M:%S")
+            u"已设置定时，开售时刻 %s，计划拉起时刻 %s"
+            % (
+                first_target.strftime(u"%Y-%m-%d %H:%M:%S"),
+                launch_target.strftime(u"%H:%M:%S"),
+            )
         )
 
     @property
@@ -300,21 +322,47 @@ class FlowCore(object):
                 return True
         return False
 
+    def _current_page(self):
+        """
+        任意页面接入：靠通用文字特征判定当前停在 i茅台 的哪个页面，
+        全机型通用、不依赖 px。返回 detail/list/igou/home/unknown。
+        """
+        has_qty = self.bridge.text_exists(u"数量")
+        if has_qty:
+            return u"detail"
+        product_center = self.bridge.node_center(PRODUCT_KEYWORDS)
+        has_jd = self.bridge.text_exists(JINGDIAN_TAB_TEXT)
+        if has_jd and product_center is not None:
+            return u"list"
+        if has_jd:
+            return u"igou"
+        if self.bridge.text_exists(IGOU_TAB_TEXT):
+            return u"home"
+        return u"unknown"
+
     # ---------------- IDLE ----------------
     def _update_idle(self, now):
-        if now >= self.first_target:
-            self._log(u"倒计时到达，开始自动进入 i购→经典")
-            self._goto(NAVIGATE_IGOU, u"正在进入 i购…")
+        """后台静默等待；到计划拉起时刻才拉起 i茅台并进入页面接入。"""
+        if now < self.launch_target:
+            self.status = u"等待拉起时刻 %s…" \
+                % self.launch_target.strftime(u"%H:%M:%S")
+            return
+        # 到点：保证 i茅台 在前台（幂等，已在前台无副作用）
+        self._log(u"到达拉起时刻，自行启动 i茅台，识别当前页面")
+        if callable(self.on_launch_app):
+            self.on_launch_app()
+        self._goto(NAVIGATE_IGOU, u"已拉起，识别当前页面…")
 
     # ---------------- NAVIGATE_IGOU ----------------
     def _update_navigate(self, dt, now):
         """
-        启动后导航（区域限定识别，再点击）：
-        1) i购页的子标签「经典」可见 → 已在 i购，点击经典；
-        2) 否则底部 i购 tab 可见 → 在首页，点击 i购（只点一次）；
-        3) 经典点击后，等经典列表双确认（飞天+%vol 与 全部/经典/精品），
-           确认后进入商品，后续逻辑不变。
-        全程动态轮询，不设固定等待。
+        任意页面接入：先识别当前停在 i茅台 的哪个页面，再从该页面继续，
+        不强制回到起点。每步用节点+区域识别点击，固定坐标仅兜底。
+          detail → 直接进年份流程；
+          list   → 点飞天进详情；
+          igou   → 区域内点经典，等列表；
+          home   → 区域内点 i购，等 i购；
+          unknown→ 加载中，动态等待（停滞累计，超限触发重校）。
         """
         if not self.bridge.is_connected():
             self._finish(
@@ -323,70 +371,60 @@ class FlowCore(object):
             )
             return
 
-        # 第一步：点 i购；第二步：点经典
-        # 区域档案 bounds 优先，无档案退回 OPPO 固定 px
-        if not self._nav_jd_clicked:
+        page = self._current_page()
+
+        if page == u"detail":
+            self._log(u"识别到当前已在详情页，直接进入年份/数量流程")
+            self._goto(SELECT_YEAR, u"已在详情，识别年份规格…")
+            return
+
+        if page == u"list":
+            center = self._list_ready()
+            if center is not None:
+                self.recorded_pos = center
+                self._log(
+                    u"识别到当前在经典列表，点击「飞天」进入，位置 (%d, %d)"
+                    % center
+                )
+                self.bridge.click_node_by_parts(PRODUCT_KEYWORDS)
+                self._goto(SELECT_YEAR, u"已进入商品，识别年份规格…")
+                return
+            # 判定在列表但未取到中心，下轮重试
+            self._tick_stall(dt)
+            self.status = u"列表确认中…"
+            return
+
+        if page == u"igou":
             jd_region = self._region(
                 u"jingdian_tab", JINGDIAN_TAB_REGION_PX
             )
-            if self.bridge.text_exists_in_px_region(
+            self._log(u"识别到当前在 i购，区域内点击「经典」")
+            if not self.bridge.click_text_in_px_region(
                 JINGDIAN_TAB_TEXT, jd_region
             ):
-                self._log(
-                    u"已在 i购，区域内识别到「经典」，点击经典"
-                )
-                if self.bridge.click_text_in_px_region(
-                    JINGDIAN_TAB_TEXT, jd_region
-                ):
-                    self._nav_jd_clicked = True
-                    self.status = u"已点击经典，等待商品列表…"
-                else:
-                    self._log(u"「经典」点击失败，下轮重试")
-                return
-
-            if not self._nav_igou_clicked:
-                igou_region = self._region(
-                    u"igou_tab", IGOU_TAB_REGION_PX
-                )
-                if self.bridge.text_exists_in_px_region(
-                    IGOU_TAB_TEXT, igou_region
-                ):
-                    self._log(
-                        u"首页底部区域内识别到「i购」，点击 i购"
-                    )
-                    if self.bridge.click_text_in_px_region(
-                        IGOU_TAB_TEXT, igou_region
-                    ):
-                        self._nav_igou_clicked = True
-                        self.status = u"已点击 i购，等待页面加载…"
-                    else:
-                        self._log(u"「i购」点击失败，下轮重试")
-                    return
-
-            # 冷启动/页面加载中：无限等，i购 tab 或经典子标签出现即动作
-            self._heartbeat_log(
-                dt, u"等待 i茅台加载（寻找 i购/经典）…"
-            )
-            self._tick_stall(dt)
-            self.status = u"等待 i茅台页面加载…"
+                self._log(u"「经典」点击失败，下轮重试")
+            self.status = u"已点击经典，等待商品列表…"
             return
 
-        # 经典已点：等经典列表双确认，确认后进入商品
-        center = self._list_ready()
-        if center is not None:
-            self.recorded_pos = center
-            self._log(
-                u"经典列表确认（全部/经典/精品），点击「飞天」进入，位置 (%d, %d)"
-                % center
+        if page == u"home":
+            igou_region = self._region(
+                u"igou_tab", IGOU_TAB_REGION_PX
             )
-            self.bridge.click_node_by_parts(PRODUCT_KEYWORDS)
-            self._goto(SELECT_YEAR, u"已进入商品，识别年份规格…")
+            self._log(u"识别到当前在首页，区域内点击「i购」")
+            if not self.bridge.click_text_in_px_region(
+                IGOU_TAB_TEXT, igou_region
+            ):
+                self._log(u"「i购」点击失败，下轮重试")
+            self.status = u"已点击 i购，等待页面加载…"
             return
 
+        # unknown：冷启动/加载中，动态等待可识别页面出现
+        self._page_entry_retries += 1
         self._heartbeat_log(
-            dt, u"已点经典，等待经典列表渲染（飞天+%vol）…"
+            dt, u"等待 i茅台加载可识别页面（首页/i购/列表/详情）…"
         )
-        self.status = u"等待经典商品列表…"
+        self._tick_stall(dt)
+        self.status = u"等待 i茅台页面加载…"
 
 
     # ---------------- ENTER_PRODUCT ----------------
@@ -639,29 +677,29 @@ class FlowCore(object):
                 target = now.replace(
                     hour=hour, minute=minute, second=0, microsecond=0
                 )
-                if target > now:
-                    # 未来时间：返回列表，整点等待，不加秒
+                if target <= now:
+                    # 按钮显示的是下一场，今天该时刻已过 → 顺延到
+                    # 次日同刻（跨天），不再无脑 RE_SCOUT 死循环
+                    target = target + timedelta(days=1)
+                    self._log(
+                        u"读取到开售时间 %s（今天已过），自动顺延至次日 %s"
+                        % (
+                            hhmm,
+                            target.strftime(u"%Y-%m-%d %H:%M"),
+                        )
+                    )
+                else:
+                    # 未来时间：今天的下一场，返回列表等整点
                     self._log(
                         u"读取到开售时间 %s（未来），返回列表，等待整点"
                         % hhmm
                     )
-                    self.bridge.back()
-                    self.session_target = target
-                    self.display_target = target
-                    self._goto(
-                        WAIT_TIME,
-                        u"等待开售 %s" % target.strftime(u"%H:%M:%S"),
-                    )
-                    return
-                # 已过时间：返回列表 → 重新进入读取下一场
-                self._log(
-                    u"读取到开售时间 %s（已过），返回列表，重新侦察下一场"
-                    % hhmm
-                )
                 self.bridge.back()
+                self.session_target = target
+                self.display_target = target
                 self._goto(
-                    RE_SCOUT,
-                    u"开售时间已过，准备重新侦察…",
+                    WAIT_TIME,
+                    u"等待开售 %s" % target.strftime(u"%m-%d %H:%M"),
                 )
                 return
 
@@ -810,22 +848,58 @@ class FlowCore(object):
 
     # ---------------- WAIT_TIME ----------------
     def _update_wait_time(self, dt, now):
-        """列表等待开售整点：到点点击记录位置进入，交由详情页处理"""
-        if now >= self.session_target:
-            if self.recorded_pos is None:
-                # 无记录位置：改为查找节点进入
-                self._log(u"开售整点到达，无记录位置，改为查找商品进入")
-                self._goto(ENTER_PRODUCT, u"整点查找商品…")
-                return
-            x, y = self.recorded_pos
-            self._log(
-                u"开售整点到达，点击记录位置 (%d, %d) 进入" % (x, y)
-            )
-            self.bridge.tap_px(x, y, TAP_JITTER_PX)
-            self._goto(SELECT_YEAR, u"整点进入，先识别年份规格…")
+        """列表等待开售整点。
+
+        到点先保证 i茅台 在前台（等待期可能被回收/切走），再识别当前
+        页面、节点确认进入：detail 直接走年份；list 节点点飞天（固定
+        坐标仅兜底）；igou/home 交 NAV 快速接入；unknown 先拉起。
+        每轮重新判定，天然重试，不盲目 goto。
+        """
+        if now < self.session_target:
+            self.status = u"等待开售整点 %s…" \
+                % self.session_target.strftime(u"%H:%M:%S")
             return
-        self.status = u"等待开售整点 %s…" \
-            % self.session_target.strftime(u"%H:%M:%S")
+
+        page = self._current_page()
+
+        if page == u"unknown":
+            self._log(u"开售整点到达但不在 i茅台，自行启动并等待接入")
+            if callable(self.on_launch_app):
+                self.on_launch_app()
+            self.status = u"整点已到，拉起 i茅台…"
+            return
+
+        if page == u"detail":
+            self._log(u"开售整点到达，当前已在详情，进入年份/数量流程")
+            self._goto(SELECT_YEAR, u"整点已在详情，识别年份规格…")
+            return
+
+        if page == u"list":
+            center = self._list_ready()
+            if center is None:
+                # 列表未确认，下轮重试，不盲目点击
+                self.status = u"整点列表确认中…"
+                return
+            self.recorded_pos = center
+            # 节点优先：点击飞天文字节点
+            if self.bridge.click_node_by_parts(PRODUCT_KEYWORDS):
+                self._log(
+                    u"开售整点到达，节点点击「飞天」进入，位置 (%d, %d)"
+                    % center
+                )
+            elif self.recorded_pos is not None:
+                # 节点失败：固定坐标兜底
+                x, y = self.recorded_pos
+                self._log(
+                    u"节点点击失败，固定坐标兜底 tap (%d, %d)" % (x, y)
+                )
+                self.bridge.tap_px(x, y, TAP_JITTER_PX)
+            self._goto(SELECT_YEAR, u"整点进入，识别年份规格…")
+            return
+
+        # igou/home：到点仍停在浅层，交 NAV 从当前页快速接入
+        self._log(u"开售整点到达，当前在 %s，快速接入" % page)
+        self._goto(NAVIGATE_IGOU, u"整点已到，快速接入…")
 
     # ---------------- RE_SCOUT ----------------
     def _update_re_scout(self, dt, now):

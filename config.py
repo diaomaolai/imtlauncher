@@ -11,7 +11,7 @@ import time
 
 # ---------------- 基础信息 ----------------
 APP_TITLE = u"i茅台助手"
-APP_VERSION = "1.2.7"
+APP_VERSION = "1.3.3"
 
 # 物理屏幕像素（adb shell wm size: 1080x2400）
 SCREEN_WIDTH = 1080
@@ -213,6 +213,13 @@ SLOT_GRACE_SECONDS = 5
 SLOT_LEAD_SECONDS = 180
 # 自启动后冷启动等待（i茅台加固，冷启动约 13 秒；仅记录日志）
 SLOT_APP_LAUNCH_LOG = u"已自动拉起 i茅台，等待进入 i购商品列表页"
+
+# 手动定时：武装后在后台静默等待，直到目标时间前这么多秒才拉起
+# i茅台（冷启动+加载约 13 秒，提前 15 秒保证整点前加载就位），
+# 不再武装即拉起；可按需要调整。
+MANUAL_LAUNCH_LEAD_SECONDS = 15
+# 任意页面接入：拉起后若不在预期页面，单次导航失败的重试上限
+PAGE_ENTRY_MAX_RETRIES = 6
 
 # ---------------- 卡密 / 状态上报 ----------------
 # 卡密服务地址（设备绑定卡密管理系统，HTTPS）

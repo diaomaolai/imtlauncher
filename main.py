@@ -349,24 +349,31 @@ class IMtAssistantApp(App):
         threading.Thread(target=work, daemon=True).start()
 
     # ---------------- 定时武装（先校验卡密）----------------
-    def _arm_flow(self, target, scheduled_text):
+    def _arm_flow(self, target, scheduled_text, immediate_launch=False):
         """
         统一武装核心（可在普通线程安全调用，手动/自启动共用）：
-        1) 立即拉起 i茅台，保证它在前台（幂等，已在前台无副作用）；
-        2) reset(now) 让状态机当场开始 i购→经典→详情导航，读到未来
-           投放时间后返回列表 WAIT 到整点，到点再点记录位置进入；
-        3) 界面更新单独走 Clock，延迟或丢失不影响武装本身。
+        - 手动定时（immediate_launch=False）：reset(target) 后在后台静默
+          等待，不拉起 i茅台；状态机在开售前提前量（config 15 秒）
+          才经 on_launch_app 自行拉起，导航到详情读开售时间，未来则
+          WAIT 到整点，到点节点确认进入抢购；
+        - 自启动（immediate_launch=True）：slot_monitor 已提前触发，
+          launch_target=now，立即拉起并导航，后续同样 WAIT 到整点。
+        界面更新单独走 Clock，延迟或冻结不影响工作线程武装与抢购。
         """
         card = self.screen.get_card_key()
         self.flow.year_target = self.screen.get_year_text()
-        self.flow.reset(datetime.now())
+        if immediate_launch:
+            self.flow.reset(target, launch_target=datetime.now())
+        else:
+            # launch_target 自动 = target - MANUAL_LAUNCH_LEAD_SECONDS
+            self.flow.reset(target)
         self.status_store.mark_start(scheduled_text, card)
         self.flow.on_popup_success = self._on_popup_success
+        # 注入拉起回调：状态机在 IDLE/WAIT 需要时自行拉起，
+        # 已在前台时 launch 幂等无副作用
+        self.flow.on_launch_app = lambda: launch_moutai(self.app_logger)
         self.app_logger.log(u"设备标识：%s" % self.screen.get_device_code())
         self.app_logger.log(u"选择年份：%s" % self.flow.year_target)
-
-        # 保证 i茅台 在前台，这是旧版手动定时缺失的关键一步
-        launch_moutai(self.app_logger)
 
         self.flow_worker = FlowWorker(
             self.flow, self.app_logger,
@@ -375,8 +382,12 @@ class IMtAssistantApp(App):
         self.flow_worker.start()
 
         self._ui(lambda: self.screen.set_schedule_button_armed(True))
-        self._ui(lambda: self.screen.set_status(
-            u"已武装，已拉起 i茅台，自动导航到详情，到点抢购"))
+        if immediate_launch:
+            self._ui(lambda: self.screen.set_status(
+                u"已自启动武装，导航到详情，到点抢购"))
+        else:
+            self._ui(lambda: self.screen.set_status(
+                u"已武装，后台等待，到点自行拉起抢购"))
 
     def _arm_schedule(self, target):
         """手动定时武装（卡密校验通过后，工作线程调用）"""
@@ -433,9 +444,9 @@ class IMtAssistantApp(App):
     def _auto_arm(self, target):
         """
         场次提前自启动武装（slot_monitor 线程调用，target 为场次整点）。
-        先停旧流程，再在本线程直接校准建档/武装，统一走 _arm_flow：
-        立即拉起 i茅台 + 当场导航，读到未来时间后 WAIT 到整点，
-        上报记录的 scheduled_time 写场次整点。
+        先停旧流程，再在本线程直接校准建档/武装，统一走 _arm_flow
+        （immediate_launch=True）：立即拉起 i茅台 + 当场导航，读到未来
+        时间后 WAIT 到整点，上报记录的 scheduled_time 写场次整点。
         """
         if self.flow_worker is not None:
             self.flow_worker.stop()
@@ -443,7 +454,8 @@ class IMtAssistantApp(App):
 
         self._ensure_profile(
             lambda: self._arm_flow(
-                target, target.strftime(u"%H:%M:00")
+                target, target.strftime(u"%H:%M:00"),
+                immediate_launch=True,
             )
         )
 
@@ -506,6 +518,16 @@ class IMtAssistantApp(App):
                 u"倒计时：%s" % format_remaining(remaining)
             )
         self.screen.set_status(self.flow.status)
+
+    def on_resume(self):
+        """从后台切回：Clock 恢复，立即刷新一次倒计时与状态，
+        避免停留在后台期间的冻结值（如 10:58）。"""
+        self._tick(0)
+
+    def on_pause(self):
+        # 允许后台驻留：返回 True，普通线程（FlowWorker/SlotMonitor）
+        # 在后台继续等待与抢购
+        return True
 
 
 def main():
