@@ -103,6 +103,45 @@ public class MtA11yService extends AccessibilityService {
     }
 
     /**
+     * 页面上是否存在给定文字中的任意一个（一次遍历判完多个）。
+     * 连点流程每拍都要判验证弹窗，逐个 textExists 会做 N 次全树
+     * 遍历，把点击间隔吃成秒级；这里合并成一次遍历。
+     */
+    public boolean anyTextExists(String[] texts) {
+        if (texts == null || texts.length == 0) {
+            return false;
+        }
+        for (AccessibilityNodeInfo root : roots()) {
+            boolean hit = nodeMatchesAny(root, texts);
+            recycle(root);
+            if (hit) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean nodeMatchesAny(AccessibilityNodeInfo node, String[] texts) {
+        if (node == null) {
+            return false;
+        }
+        CharSequence text = node.getText();
+        CharSequence desc = node.getContentDescription();
+        for (String needle : texts) {
+            if (containsSeq(text, needle) || containsSeq(desc, needle)) {
+                return true;
+            }
+        }
+        int count = node.getChildCount();
+        for (int i = 0; i < count; i++) {
+            if (nodeMatchesAny(node.getChild(i), texts)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * 页面上是否存在文字同时包含全部关键字的控件
      * （用于精确匹配 "飞天53%vol 500ml" + "带杯"）。
      */

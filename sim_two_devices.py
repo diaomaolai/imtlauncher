@@ -33,7 +33,7 @@ from config import (
 )
 from device_profile import ProfileStore
 from calibration import DeviceCalibrator
-from flow_core import FlowCore, NAVIGATE_IGOU
+from flow_core import FlowCore, NAVIGATE_IGOU, WAIT_VERIFY
 
 
 # ------------------------------------------------------------------
@@ -145,7 +145,8 @@ class SimBridge(object):
         self.H = height
         self.page = u"home"
         self.value = 2
-        self.popup_on = False
+        self.verify_on = False
+        self.order_on = False
         self.soldout_on = False
         self.buy_clicks = 0
         self.taps = []
@@ -157,7 +158,8 @@ class SimBridge(object):
     def reset_runtime(self):
         self.page = u"home"
         self.value = 2
-        self.popup_on = False
+        self.verify_on = False
+        self.order_on = False
         self.soldout_on = False
         self.buy_clicks = 0
         self.taps = []
@@ -217,12 +219,15 @@ class SimBridge(object):
         btn_text = u"已售罄" if self.soldout_on else u"立即抢购"
         out.append(node(30, 0, g[u"action"], text=btn_text,
                         class_name=u"android.widget.Button", clickable=True))
-        if self.popup_on:
+        # 安全组件（填字）验证弹窗：出现后流程必须停手等待
+        if self.verify_on:
             out.append(node(40, 0, (100, 900, self.W - 100, 1900),
                             class_name=u"android.widget.FrameLayout"))
-            out.append(node(41, 40, (250, 1000, 850, 1120),
-                            text=u"提交订单", clickable=True))
             out.append(node(42, 40, (250, 1250, 850, 1370), text=u"填字"))
+        # 人工完成验证后界面刷新成订单/支付页
+        if self.order_on:
+            out.append(node(41, 0, (250, 1000, 850, 1120),
+                            text=u"提交订单", clickable=True))
         return out
 
     # ---------------- 通用能力 ----------------
@@ -311,13 +316,9 @@ class SimBridge(object):
             self.page = u"list"
         elif text in (u"立即抢购", u"立即购买"):
             self.buy_clicks += 1
-            # 首次 RAPID 内点击后弹窗出现（READ 首点不弹）
+            # 第二次点击（进入 RAPID 后第一下）弹出安全组件验证弹窗
             if self.buy_clicks >= 2:
-                self.popup_on = True
-            # 连点若干次后售罄
-            if self.buy_clicks >= 12:
-                self.soldout_on = True
-                self.popup_on = False
+                self.verify_on = True
 
     def tap_px(self, x, y, jitter_px=6):
         self.taps.append((x, y))
@@ -383,13 +384,23 @@ def run_device(name, geo, fp, width, height, base_dir):
     flow.reset(datetime(2026, 10, 31, 8, 0, 0))
 
     ticks = 0
+    verify_ticks = 0
     while not flow.is_done and ticks < 5000:
         flow.update(0.01, datetime(2026, 10, 31, 9, 0, ticks % 60))
         ticks += 1
+        # 模拟人工完成填字验证：等待约 0.6 秒后界面刷新成订单页
+        if flow.state == WAIT_VERIFY:
+            verify_ticks += 1
+            if verify_ticks == 60:
+                bridge.verify_on = False
+                bridge.order_on = True
 
     assert flow.is_done, u"流程未结束"
-    assert flow.request_app_exit, u"未请求退出"
-    assert len(successes) == 1, u"弹窗成功次数异常"
+    assert flow.success, u"未判定抢购成功"
+    assert len(successes) == 1, u"成功上报次数异常"
+    # 出现验证弹窗后必须停止点击：整场只有首点 + RAPID 第一下
+    assert bridge.buy_clicks == 2, u"验证弹窗后仍在点击：%d" \
+        % bridge.buy_clicks
     # 数量 2→6：恰好 4 次加号，且落在档案加号中心
     plus_taps = [t for t in bridge.taps
                  if abs(t[0] - bridge.plus_center[0]) < 25]
@@ -465,8 +476,8 @@ def main():
                 handle.write(u"\n".join(lines))
             print(u"已输出：%s" % out_path)
 
-        print(u"全部断言通过：校准建档 / 档案驱动 / 弹窗成功 / "
-              u"售罄二次退出 / legacy 兜底 / 停滞重校")
+        print(u"全部断言通过：校准建档 / 档案驱动 / 验证弹窗停手 / "
+              u"订单页上报 / legacy 兜底 / 停滞重校")
     finally:
         shutil.rmtree(base, ignore_errors=True)
 

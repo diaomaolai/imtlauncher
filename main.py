@@ -28,9 +28,11 @@ from android_launcher import launch_moutai
 from flow_core import (
     FlowCore,
     RAPID_BUY,
+    READ_DETAIL,
     SELECT_YEAR,
     SELECT_QTY,
     WAIT_TIME,
+    WAIT_VERIFY,
 )
 from scheduler import parse_target_time, format_remaining
 from app_logger import AppLogger
@@ -93,16 +95,18 @@ class FlowWorker(threading.Thread):
                 pass
 
             # 节拍：
-            # - RAPID 连点：0.01s，保证一轮内连续点击间隔约 10ms；
-            # - 选年份/改数量/整点等待：0.02s，整点重进后年份+数量
-            #   在约 0.1s 内完成，抢购按钮识别点击落在 1 秒内；
-            # - 其余状态（导航/读按钮/侦察）：0.3s 动态轮询。
+            # - RAPID 连点：0.01s（等待期间不扫描，到点才点一次）；
+            # - 选年份/改数量/整点等待/等人工验证：0.02s；
+            # - READ 识别按钮：0.05s，保证整点重进后第一时间点中；
+            # - 其余状态（导航/侦察）：0.3s 动态轮询。
             if self.flow.state == RAPID_BUY:
                 self.stop_event.wait(0.01)
             elif self.flow.state in (
-                SELECT_YEAR, SELECT_QTY, WAIT_TIME
+                SELECT_YEAR, SELECT_QTY, WAIT_TIME, WAIT_VERIFY
             ):
                 self.stop_event.wait(0.02)
+            elif self.flow.state == READ_DETAIL:
+                self.stop_event.wait(0.05)
             else:
                 self.stop_event.wait(TICK_INTERVAL)
 
@@ -316,7 +320,7 @@ class IMtAssistantApp(App):
 
     def _on_popup_success(self):
         """
-        识别到购买弹窗（抢购成功）：
+        识别到订单/支付页（抢购成功，flow_core 只上报不点击）：
         1) 本地状态置 1；
         2) rush-record(status=1) 上报；
         3) decrease 扣一次（成功才扣）；
@@ -325,7 +329,7 @@ class IMtAssistantApp(App):
         self.status_store.mark_success()
         card, device = self._card_and_device()
         payload = self.status_store.build_payload(device, card)
-        self.app_logger.log(u"购买弹窗出现，抢购成功：%s" % payload)
+        self.app_logger.log(u"订单/支付页出现，抢购成功：%s" % payload)
 
         def work():
             ok1, m1, _ = card_client.rush_record(

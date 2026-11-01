@@ -26,21 +26,21 @@
    目标数量（6 瓶），同一拍内连续点完并下一拍复核，未到目标
    继续补点；数量控件缺失但按钮已渲染时放行（防改版卡死）；
 3. 详情页（动态识别，无固定等待）：
-   - 立即抢购/立即购买：识别到立刻点（1 秒内完成），随后进入连点模式：
-     随机等待 0.xx 秒 → 随机连续点击 N 次（N 为 0-9 随机数）→
-     再随机等待、再随机连点，循环不返回上一层，直到售罄；
+   - 立即抢购/立即购买：识别到立刻点，随后进入连点模式：
+     点一次 → 独立随机等 0.[X][X] 秒 → 再点一次 → 再随机等 …；
    - 开售时间（按钮"HH:MM投放"，右下角区域）：连续 2 次读数一致
-     才采信；未来时间返回列表等整点（不加秒）；已过时间返回列表，
-     每 4 秒重新进入侦察下一场；
+     才采信；未来时间返回列表等整点（不加秒）；若读到本场时间
+     但已过且仍在宽限内，说明重新加载没刷新到按钮，退出重进；
    - 已售罄：首次返回列表重新进入复核，第二次仍售罄才结束；
    - 未识别到：不中止、不返回，无限等待（应对弹窗/未刷新）；
 4. 连点模式（点击购买后）：
-   - 随机等待 0.xx 秒 → 随机连续点击 N 次（N=0-9 随机数，一拍
-     一次约 10ms）→ 再随机等待、再随机连点，循环不返回；
+   - 每点一次后独立随机 0.00~0.99 秒（两位数字各自 0-9 随机）再点；
    - 节点级 ACTION_CLICK，不会误点到弹窗上的按钮；
-   - 期间出现弹窗（支付确认/安全组件填字）→ 判定成功一次
-     （上报 rush-record + 扣次），不点任何弹窗按钮，连点不中断；
-   - 按钮变为开售时间 → 交回详情识别（WAIT/重侦）；
+   - 每次点完立刻判两类界面变化（各一次合并遍历）：
+     a) 出现安全组件（填字/点选）验证弹窗 → 立即停止点击，转入
+        WAIT_VERIFY 等待人工验证，等待期间绝不再点任何按钮；
+     b) 界面刷新成订单/支付页 → 抢购成功，上报并结束（只上报）；
+   - 切换界面前按钮变为开售时间 → 交回详情识别；
    - 只有识别到「已售罄」才停止：返回列表重新进入复核，
      二次仍为售罄才结束；
 5. 整点等待：到点点击记录位置进入，先选年份、改数量再交由详情页；
@@ -56,11 +56,14 @@ from config import (
     BUTTON_REGION_PX,
     BUY_NOW_TEXTS,
     LIST_MARKER_TEXTS,
-    POPUP_MARKER_TEXTS,
+    VERIFY_POPUP_TEXTS,
+    ORDER_PAGE_TEXTS,
+    VERIFY_POLL_INTERVAL,
     rapid_click_delay,
     SOLD_OUT_TEXTS,
     SALE_TIME_REGEX,
     RE_SCOUT_INTERVAL,
+    REENTER_GRACE_SECONDS,
     STABLE_READ_COUNT,
     WAIT_HEARTBEAT,
     TAP_JITTER_PX,
@@ -75,7 +78,6 @@ from config import (
     QTY_PLUS_CENTER_PX,
     QTY_REGEX,
     QTY_MAX_TAPS,
-    rapid_burst_count,
     RUNTIME_STALL_RECAL_SECONDS,
     MANUAL_LAUNCH_LEAD_SECONDS,
     PAGE_ENTRY_MAX_RETRIES,
@@ -88,7 +90,8 @@ ENTER_PRODUCT = u"ENTER"      # 列表查找商品并点击进入
 SELECT_YEAR = u"YEAR"         # 详情页先识别并点击年份（规格）
 SELECT_QTY = u"QTY"           # 再把数量改为目标瓶数（6）
 READ_DETAIL = u"READ"         # 数量确认后识别抢购按钮
-RAPID_BUY = u"RAPID"          # 立即抢购后持续连点（不返回，直到售罄）
+RAPID_BUY = u"RAPID"          # 立即抢购后按 0.xx 秒间隔连点
+WAIT_VERIFY = u"VERIFY"       # 安全组件验证弹窗：只等待，不点击
 WAIT_TIME = u"WAIT"           # 列表等待开售整点
 RE_SCOUT = u"SCOUT"           # 时间已过，重新进入读取下一场
 DONE = u"DONE"                # 结束（售罄）或中止（异常）
@@ -120,12 +123,16 @@ class FlowCore(object):
         # 节点对不上停滞检测：同一状态累计找不到控件的秒数
         self._stall_seconds = 0.0
         self.needs_recalibration = False
-        # 连点模式：点击计数 + 等待/连点轮次状态
+        # 连点模式：累计点击次数 + 距离下一次点击还剩的随机间隔
         self._rapid_click_count = 0
-        self._rapid_phase = u"wait"     # wait：随机等待；burst：连续点击
         self._rapid_wait_left = 0.0
-        self._rapid_burst_left = 0
-        self._rapid_rounds = 0
+        # 连点连续点不中按钮的次数（页面已变则回详情重识别）
+        self._rapid_misses = 0
+        # 安全验证弹窗等待态的轮询计时
+        self._verify_elapsed = 0.0
+        # 整点重进计数 / 详情页退回次数（日志与防死循环用）
+        self._reenter_count = 0
+        self._detail_backs = 0
         # 数量修改：本拍/累计加号点击
         self._qty_taps = 0
         # 本次要选择的年份（UI 下拉菜单武装时写入；默认当前年份）
@@ -230,10 +237,11 @@ class FlowCore(object):
         self._stall_seconds = 0.0
         self.needs_recalibration = False
         self._rapid_click_count = 0
-        self._rapid_phase = u"wait"
         self._rapid_wait_left = 0.0
-        self._rapid_burst_left = 0
-        self._rapid_rounds = 0
+        self._rapid_misses = 0
+        self._verify_elapsed = 0.0
+        self._reenter_count = 0
+        self._detail_backs = 0
         self._qty_taps = 0
         self._page_entry_retries = 0
         self._log(
@@ -270,6 +278,8 @@ class FlowCore(object):
             self._update_read_detail(dt, now)
         elif self.state == RAPID_BUY:
             self._update_rapid_buy(dt, now)
+        elif self.state == WAIT_VERIFY:
+            self._update_wait_verify(dt, now)
         elif self.state == WAIT_TIME:
             self._update_wait_time(dt, now)
         elif self.state == RE_SCOUT:
@@ -283,12 +293,12 @@ class FlowCore(object):
         self._heartbeat = 0.0
         self._last_time_hit = None
         self._stable_count = 0
-        self._buy_verified = False
+        # 注意：_buy_verified 表示"这一场已上报成功"，只在 reset()
+        # 里清；READ↔RAPID 往返不能清，否则会重复上报扣次。
         self._rapid_click_count = 0
-        self._rapid_phase = u"wait"
         self._rapid_wait_left = 0.0
-        self._rapid_burst_left = 0
-        self._rapid_rounds = 0
+        self._rapid_misses = 0
+        self._verify_elapsed = 0.0
         self._qty_taps = 0
         self._stall_seconds = 0.0
         # 注意：_soldout_pending 不在此重置，售罄复核要跨 ENTER→READ 保留
@@ -315,12 +325,33 @@ class FlowCore(object):
                 return center
         return None
 
-    def _popup_visible(self):
-        """点击购买后是否出现弹窗（任一弹窗特征文字存在即视为出现）"""
-        for marker in POPUP_MARKER_TEXTS:
-            if self.bridge.text_exists(marker):
-                return True
+    def _any_text(self, texts):
+        """
+        页面上是否存在给定文字中的任意一个。
+        优先用桥接的合并遍历（anyTextExists，一次全树扫描）；
+        电脑端/旧 APK 没有该能力时退回逐个 text_exists。
+        """
+        merged = getattr(self.bridge, "any_text_exists", None)
+        if callable(merged):
+            try:
+                return bool(merged(texts))
+            except Exception:
+                pass
+        for text in texts:
+            try:
+                if self.bridge.text_exists(text):
+                    return True
+            except Exception:
+                pass
         return False
+
+    def _verify_popup_visible(self):
+        """安全组件（填字/点选）验证弹窗是否出现"""
+        return self._any_text(VERIFY_POPUP_TEXTS)
+
+    def _order_page_visible(self):
+        """界面是否已刷新成订单/支付页（点击被受理的成功证据）"""
+        return self._any_text(ORDER_PAGE_TEXTS)
 
     def _current_page(self):
         """
@@ -618,13 +649,11 @@ class FlowCore(object):
                 self._soldout_pending = False
                 self._goto(
                     RAPID_BUY,
-                    u"已点击购买，进入连点模式直到售罄…",
+                    u"已点击购买，进入连点模式…",
                 )
-                # 进入连点：先随机等待，再随机连点一轮
-                self._rapid_phase = u"wait"
+                # 第一下已在 READ 点出，下一次点击前先等一个
+                # 独立随机的 0.[X][X] 秒
                 self._rapid_wait_left = rapid_click_delay()
-                self._rapid_burst_left = 0
-                self._rapid_rounds = 0
                 return
 
         # 2) 已售罄：需二次确认——先返回列表重新进入，
@@ -678,18 +707,41 @@ class FlowCore(object):
                     hour=hour, minute=minute, second=0, microsecond=0
                 )
                 if target <= now:
-                    # 按钮显示的是下一场，今天该时刻已过 → 顺延到
-                    # 次日同刻（跨天），不再无脑 RE_SCOUT 死循环
+                    # 业务规则：详情页按钮只有在"整点整秒之后重新加载"
+                    # 才会刷新成「立即抢购」。重进后仍读到本场时间
+                    # （含刚过），说明这次加载没刷新到按钮，按同一条
+                    # 规则退出去再进；超过宽限才认为本场已结束。
+                    late = (now - target).total_seconds()
+                    if late <= REENTER_GRACE_SECONDS:
+                        self._reenter_count += 1
+                        if self._reenter_count % 5 == 1:
+                            self._log(
+                                u"读到开售时间 %s（已过 %.1f 秒），按钮未刷新，"
+                                u"退出重进第 %d 次"
+                                % (hhmm, late, self._reenter_count)
+                            )
+                        self.bridge.back()
+                        # 目标仍是本场整点（已过），WAIT 下一拍立即重进
+                        self.session_target = target
+                        self.display_target = target
+                        self._goto(
+                            WAIT_TIME,
+                            u"重新进入详情刷新按钮（第 %d 次）…"
+                            % self._reenter_count,
+                        )
+                        return
                     target = target + timedelta(days=1)
                     self._log(
-                        u"读取到开售时间 %s（今天已过），自动顺延至次日 %s"
+                        u"读取到开售时间 %s（已过 %.0f 秒），顺延至次日 %s"
                         % (
                             hhmm,
+                            late,
                             target.strftime(u"%Y-%m-%d %H:%M"),
                         )
                     )
                 else:
                     # 未来时间：今天的下一场，返回列表等整点
+                    self._reenter_count = 0
                     self._log(
                         u"读取到开售时间 %s（未来），返回列表，等待整点"
                         % hhmm
@@ -715,14 +767,16 @@ class FlowCore(object):
     # ---------------- RAPID_BUY ----------------
     def _update_rapid_buy(self, dt, now):
         """
-        连点模式（随机等待 + 随机连点轮次）：
-        - 每个轮次：先随机等待 0.xx 秒（0.00~0.99，两位数字各取
-          0-9 随机数），再随机连续点击 N 次（N 为 0-9 随机数，
-          一拍一次，约 10ms 一拍），然后进入下一轮；
-        - 每拍都先判断：售罄退出 / 弹窗记一次成功 / 按钮变时间
-          交回 READ；节点级 ACTION_CLICK，弹窗覆盖也不会误点弹窗；
-        - 不返回上一层，直到识别到「已售罄」：返回列表重新进入复核，
-          READ 二次确认仍为售罄才结束启动器。
+        抢购连点（严格 0.[X][X] 秒间隔，无轮次、无连击）：
+        - 每点一次「立即抢购/立即购买」，就重新随机 0.00~0.99 秒
+          （两位数字各自 0-9）再点下一次；
+        - 等待期间只做倒计时，不做任何节点扫描，保证间隔不被 JNI
+          耗时吃掉；
+        - 每次点完立刻判两类界面变化（各一次合并遍历）：
+          a) 安全组件（填字/点选）验证弹窗 → 立即停止点击，
+             转 WAIT_VERIFY 等待人工验证，期间绝不再点任何按钮；
+          b) 界面刷新成订单/支付页 → 抢购成功，上报后结束；
+        - 识别到「已售罄」→ 返回列表重新进入二次复核（唯一正常退出）。
         """
         if not self.bridge.is_connected():
             self._finish(
@@ -730,7 +784,18 @@ class FlowCore(object):
             )
             return
 
-        # 1) 售罄优先（唯一退出条件，首次走复核）
+        # 1) 还没到下一次点击时刻：纯等待，不扫描
+        if self._rapid_wait_left > 0.0:
+            self._rapid_wait_left -= dt
+            if self._rapid_wait_left > 0.0:
+                self.status = (
+                    u"连点等待中（已点 %d 次，剩 %.2f 秒）…"
+                    % (self._rapid_click_count,
+                       max(0.0, self._rapid_wait_left))
+                )
+                return
+
+        # 2) 售罄优先（唯一正常退出，首次走复核）
         sold_out = False
         for text in SOLD_OUT_TEXTS:
             if self.bridge.text_exists(text):
@@ -746,105 +811,108 @@ class FlowCore(object):
             self._goto(ENTER_PRODUCT, u"售罄复核，重新进入确认…")
             return
 
-        # 2) 弹窗出现：只记一次成功（上报扣次），不点弹窗，连点继续
-        if not self._buy_verified and self._popup_visible():
-            self._buy_verified = True
-            self._log(u"购买弹窗已出现，判定抢购成功（继续连点，不点弹窗）")
-            if callable(getattr(self, "on_popup_success", None)):
-                try:
-                    self.on_popup_success()
-                except Exception:
-                    pass
-
-        # 3) 随机等待阶段：只观察，不点击
-        if self._rapid_phase == u"wait":
-            self._rapid_wait_left -= dt
-            if self._rapid_wait_left > 0.0:
-                # 等待期间按钮若已变为开售时间，交回 READ
-                hits = self.bridge.find_regex_in_px_region(
-                    SALE_TIME_REGEX, self._button_region()
-                )
-                if hits:
-                    self._log(
-                        u"连点中按钮变为开售时间 %s，交回详情识别"
-                        % hits[0]
-                    )
-                    self._goto(READ_DETAIL, u"按钮变为时间，重新识别…")
-                    return
-                self.status = (
-                    u"连点等待中（已点 %d 次，剩 %.2f 秒）…"
-                    % (self._rapid_click_count,
-                       max(0.0, self._rapid_wait_left))
-                )
-                return
-
-            # 随机等待结束：决定本轮随机连点次数 N（0-9）
-            burst = rapid_burst_count()
-            self._rapid_rounds += 1
-            self._rapid_burst_left = burst
-            self._rapid_phase = u"burst"
-            if burst > 0:
-                self._log(
-                    u"第 %d 轮连点开始：随机等待结束，本轮连续点击 %d 次"
-                    % (self._rapid_rounds, burst)
-                )
-            else:
-                # 本轮随机到 0 次，直接进入下一轮等待
-                self._rapid_phase = u"wait"
-                self._rapid_wait_left = rapid_click_delay()
-            return
-
-        # 4) 连点阶段：一拍点击一次购买按钮
+        # 3) 点一次
         clicked = False
         for text in BUY_NOW_TEXTS:
             if self.bridge.click_text(text):
                 clicked = True
                 self._rapid_click_count += 1
-                self._rapid_burst_left -= 1
                 if self._rapid_click_count == 1:
                     self._log(
-                        u"连点模式：随机等待 0.xx 秒 → 随机连续点击 N 次"
-                        u"（N 为 0-9 随机数）→ 再随机等待、再连点，"
-                        u"循环点击「%s」直到售罄" % text
+                        u"连点模式：每点一次后随机等 0.[X][X] 秒"
+                        u"（X 各自 0-9）再点下一次，点击「%s」" % text
                     )
                 elif self._rapid_click_count % 20 == 0:
                     self._log(
-                        u"连点中：已点击购买 %d 次（%d 轮）"
-                        % (self._rapid_click_count, self._rapid_rounds)
+                        u"连点中：已点击「立即抢购」%d 次"
+                        % self._rapid_click_count
                     )
                 break
 
-        # 5) 找不到按钮：弹窗遮挡则继续；变成开售时间则交回 READ
-        if not clicked:
-            hits = self.bridge.find_regex_in_px_region(
-                SALE_TIME_REGEX, self._button_region()
-            )
-            if hits:
-                self._log(
-                    u"连点中按钮变为开售时间 %s，交回详情识别" % hits[0]
-                )
-                self._goto(READ_DETAIL, u"按钮变为时间，重新识别…")
-                return
-
-        # 6) 本轮连点次数用完：进入下一轮随机等待
-        if self._rapid_burst_left <= 0:
-            if self._rapid_rounds % 5 == 0:
-                self._log(
-                    u"第 %d 轮连点完成，累计点击 %d 次，重新随机等待"
-                    % (self._rapid_rounds, self._rapid_click_count)
-                )
-            self._rapid_phase = u"wait"
-            self._rapid_wait_left = rapid_click_delay()
+        # 4) 点完立刻判界面变化：订单/支付页 → 成功（只上报不操作）
+        if self._order_page_visible():
+            self._on_order_page()
             return
 
-        self.status = (
-            u"第 %d 轮连点中（本轮剩 %d 次，累计 %d 次）…"
-            % (
-                self._rapid_rounds,
-                max(0, self._rapid_burst_left),
-                self._rapid_click_count,
+        # 5) 安全组件验证弹窗 → 立即停手等待人工验证
+        if self._verify_popup_visible():
+            self._log(
+                u"出现安全组件验证弹窗，立即停止点击，等待人工验证"
             )
+            self._verify_elapsed = 0.0
+            self._goto(WAIT_VERIFY, u"安全验证弹窗，等待人工处理…")
+            return
+
+        # 6) 没点中：连续多次说明页面已变，回详情重新识别
+        if not clicked:
+            self._rapid_misses += 1
+            if self._rapid_misses >= 3:
+                self._log(
+                    u"连续 %d 次未点到买入按钮，回详情重新识别"
+                    % self._rapid_misses
+                )
+                self._goto(READ_DETAIL, u"重新识别买入按钮…")
+                return
+        else:
+            self._rapid_misses = 0
+
+        # 7) 安排下一次点击的独立随机间隔
+        self._rapid_wait_left = rapid_click_delay()
+        self.status = (
+            u"已点 %d 次，%.2f 秒后点下一次…"
+            % (self._rapid_click_count, self._rapid_wait_left)
         )
+
+    def _on_order_page(self):
+        """
+        界面已刷新成订单/支付页（A 方案）：只上报记录，不做任何点击。
+        同一场只上报一次，避免 READ↔RAPID 往返重复扣次。
+        """
+        if not self._buy_verified:
+            self._buy_verified = True
+            self._log(
+                u"界面已刷新为订单/支付页，判定抢购成功，仅上报不操作"
+            )
+            if callable(getattr(self, "on_popup_success", None)):
+                try:
+                    self.on_popup_success()
+                except Exception:
+                    pass
+        self._finish(True, u"已进入订单/支付页，请手动完成支付")
+
+    # ---------------- WAIT_VERIFY ----------------
+    def _update_wait_verify(self, dt, now):
+        """
+        安全组件（填字/点选）验证弹窗等待态：
+        - 只观察，绝不点击（人工去完成验证）；
+        - 每 VERIFY_POLL_INTERVAL 秒判一次：
+          订单/支付页出现 → 上报成功，结束流程；
+          验证弹窗消失且回到详情页 → 人工已关闭/完成，继续连点。
+        """
+        if not self.bridge.is_connected():
+            self._finish(
+                False, u"无障碍服务未开启，请先到设置中开启后重新定时"
+            )
+            return
+
+        self._verify_elapsed += dt
+        if self._verify_elapsed < VERIFY_POLL_INTERVAL:
+            self.status = u"等待人工完成安全验证…"
+            return
+        self._verify_elapsed = 0.0
+
+        if self._order_page_visible():
+            self._on_order_page()
+            return
+
+        if not self._verify_popup_visible() \
+                and self.bridge.text_exists(u"数量"):
+            self._log(u"验证弹窗已关闭，回到详情页，继续连点")
+            self._rapid_wait_left = 0.0
+            self._goto(RAPID_BUY, u"继续连点抢购…")
+            return
+
+        self.status = u"等待人工完成安全验证…"
 
     # ---------------- WAIT_TIME ----------------
     def _update_wait_time(self, dt, now):
@@ -861,6 +929,8 @@ class FlowCore(object):
             return
 
         page = self._current_page()
+        if page != u"detail":
+            self._detail_backs = 0
 
         if page == u"unknown":
             self._log(u"开售整点到达但不在 i茅台，自行启动并等待接入")
@@ -870,7 +940,18 @@ class FlowCore(object):
             return
 
         if page == u"detail":
-            self._log(u"开售整点到达，当前已在详情，进入年份/数量流程")
+            # 业务规则：按钮只有在"整点整秒之后重新加载详情页"才会
+            # 刷新成「立即抢购」。整点还停在详情页说明是旧页面，
+            # 先退回列表，下一拍重进；退回失败才按当前页继续识别。
+            if self._detail_backs < 3:
+                self._detail_backs += 1
+                self._log(
+                    u"整点已在详情页（旧页面），退回列表准备重进"
+                )
+                self.bridge.back()
+                self.status = u"退回列表，准备重新进入…"
+                return
+            self._log(u"详情页退回失败，按当前页继续识别")
             self._goto(SELECT_YEAR, u"整点已在详情，识别年份规格…")
             return
 

@@ -317,6 +317,61 @@ if __name__ == u"__main__":
     print(u"  结果：%s" % (u"PASS" if ok4 else u"FAIL"))
     results.append((u"场景4", ok4))
 
+    # 场景5：整点重进后按钮仍是「09:00投放」（这次加载没刷到）。
+    # 业务规则要求退出重进，而不是把本场判成"已过 → 顺延次日"。
+    print(u"\n" + u"=" * 64)
+    print(u"场景：整点重进未刷新（09:00:00.3 仍显示 09:00投放）"
+          u" → 退出重进，不顺延次日")
+    lg5 = ListLogger()
+    br5 = MockBridge(start_page=u"detail", always_future=True)
+    fl5 = FlowCore(br5, lg5)
+    fl5.year_target = YEAR_TARGET_TEXT
+    arm5 = day.replace(hour=9)
+    cur5 = arm5 + timedelta(seconds=0.3)
+    br5.set_now(cur5)
+    fl5.reset(arm5, launch_target=cur5)
+    fl5.on_launch_app = br5.launch
+    for _i in range(400):
+        br5.set_now(cur5)
+        fl5.update(0.05, cur5)
+        if fl5.state == WAIT_TIME and fl5._reenter_count >= 1:
+            break
+        cur5 += timedelta(seconds=0.05)
+    ok5 = (
+        fl5.state == WAIT_TIME
+        and fl5._reenter_count >= 1
+        and fl5.session_target == arm5
+        and br5.backs >= 1
+    )
+    print(u"  重进次数=%d，back=%d，session_target=%s，状态=%s"
+          % (fl5._reenter_count, br5.backs,
+             fl5.session_target.strftime(u"%Y-%m-%d %H:%M:%S")
+             if fl5.session_target else u"None",
+             fl5.state))
+    print(u"  结果：%s" % (u"PASS" if ok5 else u"FAIL"))
+    results.append((u"场景5", ok5))
+
+    # 场景6：整点人还停在详情页（旧页面，按钮不会刷新）→ 先退回列表
+    print(u"\n" + u"=" * 64)
+    print(u"场景：整点已在详情页（旧页面） → 先退回列表准备重进")
+    lg6 = ListLogger()
+    br6 = MockBridge(start_page=u"detail", always_future=True)
+    fl6 = FlowCore(br6, lg6)
+    fl6.year_target = YEAR_TARGET_TEXT
+    cur6 = day.replace(hour=9)
+    br6.set_now(cur6)
+    fl6.reset(day.replace(hour=9), launch_target=cur6 - timedelta(seconds=15))
+    fl6.on_launch_app = br6.launch
+    fl6.session_target = cur6
+    fl6._goto(WAIT_TIME, u"整点等待…")
+    br6.set_now(cur6)
+    fl6.update(0.05, cur6)
+    ok6 = br6.page == u"list" and fl6._detail_backs == 1
+    print(u"  页面=%s，退回次数=%d，状态=%s"
+          % (br6.page, fl6._detail_backs, fl6.state))
+    print(u"  结果：%s" % (u"PASS" if ok6 else u"FAIL"))
+    results.append((u"场景6", ok6))
+
     print(u"\n" + u"=" * 64)
     print(u"汇总：")
     for n, ok in results:

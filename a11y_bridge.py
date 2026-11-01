@@ -32,6 +32,8 @@ class A11yBridge(object):
 
     def __init__(self):
         self._service_class = None
+        # 服务端是否支持 anyTextExists（旧 APK 没有，首次失败后退回）
+        self._any_supported = True
         if _ANDROID:
             self._init_native()
 
@@ -90,6 +92,31 @@ class A11yBridge(object):
             return bool(service.textExists(text))
         except Exception:
             return False
+
+    def any_text_exists(self, texts):
+        """
+        一次遍历判断页面上是否存在给定文字中的任意一个。
+        连点流程每个节拍都要判弹窗，逐个 textExists 会做 N 次全树
+        遍历，必须合并成一次（Java anyTextExists）。
+        老版本 APK 没有该方法时自动退回逐个 textExists。
+        """
+        service = self._service_or_none()
+        if service is None:
+            return False
+        wanted = [u"%s" % text for text in texts]
+        if self._any_supported:
+            try:
+                return bool(service.anyTextExists(wanted))
+            except Exception:
+                # 方法不存在（旧 APK）：本次起退回逐个判断
+                self._any_supported = False
+        for text in wanted:
+            try:
+                if service.textExists(text):
+                    return True
+            except Exception:
+                pass
+        return False
 
     def click_node_by_parts(self, keywords):
         """点击文字同时包含全部关键字的控件节点，成功返回 True"""
