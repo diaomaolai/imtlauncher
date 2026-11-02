@@ -29,6 +29,7 @@ from config import (
     JINGDIAN_TAB_REGION_PX,
     YEAR_CELL_REGION_PX,
     QTY_VALUE_REGION_PX,
+    PRODUCT_FULL_TEXTS,
     RUNTIME_STALL_RECAL_SECONDS,
 )
 from device_profile import ProfileStore
@@ -314,6 +315,9 @@ class SimBridge(object):
             self.page = u"igou"
         elif text == u"经典":
             self.page = u"list"
+        elif text in PRODUCT_FULL_TEXTS:
+            # 按完整商品名点击：直接进详情页
+            self.page = u"detail"
         elif text in (u"立即抢购", u"立即购买"):
             self.buy_clicks += 1
             # 第二次点击（进入 RAPID 后第一下）弹出安全组件验证弹窗

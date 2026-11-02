@@ -22,6 +22,7 @@ from kivy.uix.widget import Widget
 
 from config import (
     APP_TITLE,
+    APP_VERSION,
     DEFAULT_TIME_TEXT,
     YEAR_CHOICES,
     YEAR_TARGET_TEXT,
@@ -63,6 +64,22 @@ class MainScreen(BoxLayout):
             Color(0.97, 0.96, 0.92, 1)
             self._background = Rectangle(pos=self.pos, size=self.size)
         self.bind(pos=self._redraw_background, size=self._redraw_background)
+
+        # 左上角版本号：方便用户确认当前使用的版本
+        self.version_label = Label(
+            text=u"版本 %s" % APP_VERSION,
+            font_size="12sp",
+            color=(0.45, 0.45, 0.45, 1),
+            halign="left",
+            valign="middle",
+            size_hint=(1, 0.03),
+        )
+        self.version_label.bind(
+            width=lambda instance, value: setattr(
+                instance, "text_size", (value, None)
+            )
+        )
+        self.add_widget(self.version_label)
 
         # 标题
         self.title_label = Label(

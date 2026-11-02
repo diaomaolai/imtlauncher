@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-定时调度模块
+时间解析模块
 
 职责：
 1. 解析 UI 中填写的时间字符串（如 "08:00:01"）；
 2. 计算目标时刻（只填时分秒时默认今天，今天已过则顺延到明天）；
-3. 提供倒计时与"是否到点"判断。
+3. 把剩余秒数格式化为 HH:MM:SS 供界面倒计时显示。
 
 本模块不依赖 Kivy，方便在电脑端直接单元测试。
 """
@@ -76,41 +76,3 @@ def format_remaining(seconds):
     minutes, secs = divmod(remainder, 60)
     return u"%02d:%02d:%02d" % (hours, minutes, secs)
 
-
-class LaunchScheduler(object):
-    """定时启动调度器：武装/取消、倒计时、到点判定"""
-
-    def __init__(self):
-        self._target = None
-
-    @property
-    def target(self):
-        """当前目标时刻；未武装时为 None"""
-        return self._target
-
-    @property
-    def is_armed(self):
-        """是否已设定定时任务"""
-        return self._target is not None
-
-    def arm(self, target):
-        """武装定时任务，target 为 datetime"""
-        if not isinstance(target, datetime):
-            raise TypeError(u"target 必须是 datetime 对象")
-        self._target = target
-
-    def cancel(self):
-        """取消定时任务"""
-        self._target = None
-
-    def remaining(self, now=None):
-        """剩余秒数（float）；未武装时返回 None"""
-        if self._target is None:
-            return None
-        now = now if now is not None else datetime.now()
-        return (self._target - now).total_seconds()
-
-    def should_fire(self, now=None):
-        """是否已到触发时刻"""
-        remaining = self.remaining(now)
-        return remaining is not None and remaining <= 0

@@ -140,7 +140,6 @@ class MockBridge(object):
     def click_text(self, text):
         c = self._find_text(text)
         if c is not None:
-            self.buy_clicks += 1
             self._on_click(text)
             return True
         return False
@@ -179,6 +178,11 @@ class MockBridge(object):
             self.page = u"igou"
         elif text == u"经典":
             self.page = u"list"
+        elif u"飞天53%vol" in text:
+            # 按完整商品名点击 → 进详情页
+            self.page = u"detail"
+        elif text in (u"立即抢购", u"立即购买"):
+            self.buy_clicks += 1
 
 
 def drive(flow, bridge, start, max_seconds=200000, verbose=True):
@@ -287,11 +291,11 @@ if __name__ == u"__main__":
     )
     results.append((u"场景3", ok3))
 
-    # 场景4：进详情时已过点（09:10），验证 +1 天顺延。
-    # always_future 让按钮在 09:10 仍显示「09:00投放」（下一场），
-    # 手动推进有限拍直到进入 WAIT，再断言，不跑到次日。
+    # 场景4：同一小时内过点（09:10，按钮仍显示 09:00投放）。
+    # 按业务规则应"延续本场、退出重进刷新"，不顺延次日。
     print(u"\n" + u"=" * 64)
-    print(u"场景：过点顺延（09:10 已在详情，按钮 09:00，应顺延次日）")
+    print(u"场景：同小时内过点（09:10 已在详情，按钮 09:00）"
+          u" → 退出重进，不顺延次日")
     lg = ListLogger()
     br = MockBridge(start_page=u"detail", always_future=True)
     fl = FlowCore(br, lg)
@@ -304,18 +308,48 @@ if __name__ == u"__main__":
     for _i in range(200):
         br.set_now(cur)
         fl.update(0.1, cur)
-        if fl.state == WAIT_TIME:
+        if fl.state == WAIT_TIME and fl._reenter_count >= 1:
             break
         cur += timedelta(seconds=0.1)
-    expect_target = day.replace(hour=9) + timedelta(days=1)
-    ok4 = fl.state == WAIT_TIME and fl.session_target == expect_target
+    ok4 = (
+        fl.state == WAIT_TIME
+        and fl._reenter_count >= 1
+        and fl.session_target == day.replace(hour=9)
+    )
     if fl.session_target is not None:
-        print(u"  session_target=%s，状态=%s"
-              % (fl.session_target.strftime(u"%Y-%m-%d %H:%M"), fl.state))
+        print(u"  session_target=%s，重进次数=%d，状态=%s"
+              % (fl.session_target.strftime(u"%Y-%m-%d %H:%M"),
+                 fl._reenter_count, fl.state))
     else:
         print(u"  session_target 未设置，状态=%s" % fl.state)
     print(u"  结果：%s" % (u"PASS" if ok4 else u"FAIL"))
     results.append((u"场景4", ok4))
+
+    # 场景4b：超过一小时（11:00 仍读到 09:00 投放）→ 才是真的过点，顺延次日
+    print(u"\n" + u"=" * 64)
+    print(u"场景：超过一小时（11:00 读到 09:00 投放） → 顺延次日")
+    lg4b = ListLogger()
+    br4b = MockBridge(start_page=u"detail", always_future=True)
+    fl4b = FlowCore(br4b, lg4b)
+    fl4b.year_target = YEAR_TARGET_TEXT
+    arm4b = day.replace(hour=11, minute=0)
+    cur4b = arm4b
+    br4b.set_now(cur4b)
+    fl4b.reset(day.replace(hour=9), launch_target=arm4b)
+    fl4b.on_launch_app = br4b.launch
+    for _i in range(200):
+        br4b.set_now(cur4b)
+        fl4b.update(0.1, cur4b)
+        if fl4b.state == WAIT_TIME:
+            break
+        cur4b += timedelta(seconds=0.1)
+    expect4b = day.replace(hour=9) + timedelta(days=1)
+    ok4b = fl4b.state == WAIT_TIME and fl4b.session_target == expect4b
+    print(u"  session_target=%s，状态=%s"
+          % (fl4b.session_target.strftime(u"%Y-%m-%d %H:%M")
+             if fl4b.session_target else u"None", fl4b.state))
+    print(u"  结果：%s" % (u"PASS" if ok4b else u"FAIL"))
+    results.append((u"场景4b", ok4b))
 
     # 场景5：整点重进后按钮仍是「09:00投放」（这次加载没刷到）。
     # 业务规则要求退出重进，而不是把本场判成"已过 → 顺延次日"。

@@ -34,6 +34,8 @@ class A11yBridge(object):
         self._service_class = None
         # 服务端是否支持 anyTextExists（旧 APK 没有，首次失败后退回）
         self._any_supported = True
+        # 服务端是否支持一次手势连点（旧 APK 没有，首次失败后退回）
+        self._multi_supported = True
         if _ANDROID:
             self._init_native()
 
@@ -239,6 +241,29 @@ class A11yBridge(object):
             return bool(service.tapPxHuman(int(x), int(y), int(jitter_px)))
         except Exception:
             return False
+
+    def tap_multi_px(self, x, y, count, jitter_px=6, gap_ms=130):
+        """
+        同一位置连续点击 count 次，一次手势派发（数量加号用）。
+        老版本 APK 没有该方法时退回逐个 tap_px。
+        """
+        count = int(count)
+        if count <= 0:
+            return True
+        service = self._service_or_none()
+        if service is None:
+            return False
+        if self._multi_supported:
+            try:
+                return bool(service.tapMultiPxHuman(
+                    int(x), int(y), count, int(jitter_px), int(gap_ms)
+                ))
+            except Exception:
+                self._multi_supported = False
+        for _ in range(count):
+            if not self.tap_px(x, y, jitter_px):
+                return False
+        return True
 
     # ---------------- 返回 ----------------
     def back(self):

@@ -31,6 +31,7 @@ from flow_core import (
     READ_DETAIL,
     SELECT_YEAR,
     SELECT_QTY,
+    WAIT_DETAIL,
     WAIT_TIME,
     WAIT_VERIFY,
 )
@@ -102,7 +103,8 @@ class FlowWorker(threading.Thread):
             if self.flow.state == RAPID_BUY:
                 self.stop_event.wait(0.01)
             elif self.flow.state in (
-                SELECT_YEAR, SELECT_QTY, WAIT_TIME, WAIT_VERIFY
+                SELECT_YEAR, SELECT_QTY, WAIT_TIME, WAIT_VERIFY,
+                WAIT_DETAIL,
             ):
                 self.stop_event.wait(0.02)
             elif self.flow.state == READ_DETAIL:
@@ -506,8 +508,8 @@ class IMtAssistantApp(App):
     # ---------------- 界面刷新 ----------------
     def _tick(self, dt):
         if self.flow.is_done:
-            # 不再 finish 杀进程：保留进程与监控守护线程盯后续场次，
-            # 退出由用户手动操作（request_app_exit 仅记录，不再执行）。
+            # 不再杀进程：保留进程与监控守护线程盯后续场次，
+            # 退出由用户手动操作。
             self.screen.set_status(self.flow.status)
             self._disarm(self.flow.status)
             return

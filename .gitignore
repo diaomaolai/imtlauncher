@@ -9,6 +9,13 @@ buildozer/
 *.apk
 *.aab
 
+# APK 归档 / 临时产物 / 打包副本
+apk_download*/
+*.zip
+*.log
+_tmp/
+dist_src/
+
 # 系统杂项
 Thumbs.db
 .DS_Store

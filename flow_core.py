@@ -52,7 +52,7 @@
 from datetime import timedelta
 
 from config import (
-    PRODUCT_KEYWORDS,
+    PRODUCT_FULL_TEXTS,
     BUTTON_REGION_PX,
     BUY_NOW_TEXTS,
     LIST_MARKER_TEXTS,
@@ -68,8 +68,10 @@ from config import (
     RAPID_REENTER_MAX_ROUNDS,
     SOLD_OUT_TEXTS,
     SALE_TIME_REGEX,
-    RE_SCOUT_INTERVAL,
     REENTER_GRACE_SECONDS,
+    REENTER_MIN_INTERVAL,
+    DETAIL_ENTER_TIMEOUT,
+    DETAIL_ENTER_POLL,
     STABLE_READ_COUNT,
     WAIT_HEARTBEAT,
     TAP_JITTER_PX,
@@ -86,20 +88,19 @@ from config import (
     QTY_MAX_TAPS,
     RUNTIME_STALL_RECAL_SECONDS,
     MANUAL_LAUNCH_LEAD_SECONDS,
-    PAGE_ENTRY_MAX_RETRIES,
 )
 
 # 状态
 IDLE = u"IDLE"                # 等待首次倒计时
 NAVIGATE_IGOU = u"NAV"        # 启动后导航：点 i购 → 点经典
 ENTER_PRODUCT = u"ENTER"      # 列表查找商品并点击进入
+WAIT_DETAIL = u"DETAIL"       # 已点商品，等详情页渲染（「数量」出现）
 SELECT_YEAR = u"YEAR"         # 详情页先识别并点击年份（规格）
 SELECT_QTY = u"QTY"           # 再把数量改为目标瓶数（6）
 READ_DETAIL = u"READ"         # 数量确认后识别抢购按钮
 RAPID_BUY = u"RAPID"          # 立即抢购后按 0.xx 秒间隔连点
 WAIT_VERIFY = u"VERIFY"       # 安全组件验证弹窗：只等待，不点击
 WAIT_TIME = u"WAIT"           # 列表等待开售整点
-RE_SCOUT = u"SCOUT"           # 时间已过，重新进入读取下一场
 DONE = u"DONE"                # 结束（售罄）或中止（异常）
 
 
@@ -119,8 +120,6 @@ class FlowCore(object):
         self.state = DONE
         self.status = u""
         self.success = False
-        self.request_app_exit = False
-        self._elapsed = 0.0
         self._heartbeat = 0.0
         self._last_time_hit = None
         self._stable_count = 0
@@ -153,13 +152,17 @@ class FlowCore(object):
         self.on_launch_app = None
         # 计划拉起时刻（手动=目标-提前量；自启动=立即）
         self.launch_target = None
-        # 任意页面接入：导航重试计数
-        self._page_entry_retries = 0
         # 详情页年份/数量控件等待宽限累计（跨 YEAR/QTY，不被 _goto 清）
         self._entry_wait = 0.0
         # 本轮自动重进的点击阈值 + 已重进轮次（防死循环）
         self._rapid_reenter_limit = 0
         self._rapid_reenter_rounds = 0
+        # 整点快速入页：是否已尝试直接点商品、等详情页的计时
+        self._slot_fast_done = False
+        self._detail_enter_elapsed = 0.0
+        self._detail_enter_next = 0.0
+        # 重进刷新的最小间隔：下一次允许重进的最早时刻
+        self._reenter_next_at = None
 
     # ---------------- 日志 ----------------
     def _log(self, message):
@@ -241,8 +244,6 @@ class FlowCore(object):
         self.state = IDLE
         self.status = u"等待启动时刻…"
         self.success = False
-        self.request_app_exit = False
-        self._elapsed = 0.0
         self._heartbeat = 0.0
         self._last_time_hit = None
         self._stable_count = 0
@@ -259,10 +260,13 @@ class FlowCore(object):
         self._reenter_count = 0
         self._detail_backs = 0
         self._qty_taps = 0
-        self._page_entry_retries = 0
         self._entry_wait = 0.0
         self._rapid_reenter_limit = 0
         self._rapid_reenter_rounds = 0
+        self._slot_fast_done = False
+        self._detail_enter_elapsed = 0.0
+        self._detail_enter_next = 0.0
+        self._reenter_next_at = None
         self._log(
             u"已设置定时，开售时刻 %s，计划拉起时刻 %s"
             % (
@@ -294,6 +298,8 @@ class FlowCore(object):
             self._update_navigate(dt, now)
         elif self.state == ENTER_PRODUCT:
             self._update_enter_product(dt, now)
+        elif self.state == WAIT_DETAIL:
+            self._update_wait_detail(dt, now)
         elif self.state == SELECT_YEAR:
             self._update_select_year(dt, now)
         elif self.state == SELECT_QTY:
@@ -306,14 +312,11 @@ class FlowCore(object):
             self._update_wait_verify(dt, now)
         elif self.state == WAIT_TIME:
             self._update_wait_time(dt, now)
-        elif self.state == RE_SCOUT:
-            self._update_re_scout(dt, now)
 
-    def _goto(self, state, status, elapsed=0.0):
+    def _goto(self, state, status):
         """切换状态并重置计时器"""
         self.state = state
         self.status = status
-        self._elapsed = elapsed
         self._heartbeat = 0.0
         self._last_time_hit = None
         self._stable_count = 0
@@ -325,9 +328,16 @@ class FlowCore(object):
         self._verify_elapsed = 0.0
         self._qty_taps = 0
         self._stall_seconds = 0.0
-        # 每次新进入详情页链路，重置年份/数量控件的等待宽限
-        if state == SELECT_YEAR:
+        # 年份、数量各自独立计时 3 秒宽限：年份加载慢不能把数量的
+        # 宽限一起吃掉，否则会跳过"改 6 瓶"。
+        if state in (SELECT_YEAR, SELECT_QTY):
             self._entry_wait = 0.0
+        # 整点快速入页/等详情页：进入新状态时重新计时
+        self._slot_fast_done = False
+        self._detail_enter_elapsed = 0.0
+        self._detail_enter_next = 0.0
+        # 注意：_reenter_next_at 不在此重置——重进间隔由 _handle_sale_time
+        # 在 _goto 之后设置，跨 WAIT 保留才有意义。
         # 注意：_soldout_pending 不在此重置，售罄复核要跨 ENTER→READ 保留
 
     def _heartbeat_log(self, dt, message):
@@ -337,20 +347,118 @@ class FlowCore(object):
             self._log(message)
             self._heartbeat = 0.0
 
+    def _product_center(self):
+        """整页按完整商品名取中心（兼容全角/半角括号），取不到返回 None"""
+        for name in PRODUCT_FULL_TEXTS:
+            center = self.bridge.node_center((name,))
+            if center is not None:
+                return center
+        return None
+
     def _list_ready(self):
         """
-        确认当前确实在商品列表页：
-        既有「飞天」+「%vol」商品节点，又有列表独有标签
-        （全部/经典/精品）。返回商品节点中心，否则 None。
-        详情页标题也含"飞天"，靠标签排除误判。
+        确认当前确实在目标商品列表页，返回商品节点中心，否则 None。
+        识别顺序（越靠前越精准）：
+        1) 档案 product_card 区域 + 完整商品名：只认校准过的卡位和
+           全称，页面别处的「飞天」文字不会干扰；
+        2) 整页完整商品名 + 列表标签（全部/经典/精品）：无档案时兜底；
+        3) 都没有 → None（不点，等待）。
+        「鼓乐飞天」等其它商品同样含「飞天」「%vol」，所以不再用
+        两个关键词做商品判定。
         """
-        center = self.bridge.node_center(PRODUCT_KEYWORDS)
+        region = self._profile_bounds(u"product_card")
+        if region is not None:
+            for name in PRODUCT_FULL_TEXTS:
+                if self.bridge.text_exists_in_px_region(name, region):
+                    center = self._profile_center(u"product_card")
+                    if center is not None:
+                        return center
+        center = self._product_center()
         if center is None:
             return None
         for marker in LIST_MARKER_TEXTS:
             if self.bridge.text_exists(marker):
                 return center
         return None
+
+    def _click_product(self):
+        """
+        点目标商品进详情：档案卡位区域 + 完整名称优先，失败再按全称
+        节点点击。
+        这里**不做**「飞天」+「%vol」关键词兜底——那会点中
+        「鼓乐飞天」等同样含这两个词的其它商品。点不到就返回 False，
+        由调用方留在列表页重试。
+        """
+        region = self._profile_bounds(u"product_card")
+        if region is not None:
+            for name in PRODUCT_FULL_TEXTS:
+                try:
+                    if self.bridge.click_text_in_px_region(name, region):
+                        return True
+                except Exception:
+                    pass
+        for name in PRODUCT_FULL_TEXTS:
+            try:
+                if self.bridge.click_text(name):
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _tap_buy(self):
+        """
+        点「立即抢购/立即购买」：按钮区（档案 action_button）内优先，
+        失败退回全页节点点击。返回点中的文字，未点中返回 None。
+        """
+        region = self._button_region()
+        for text in BUY_NOW_TEXTS:
+            try:
+                if self.bridge.click_text_in_px_region(text, region):
+                    return text
+            except Exception:
+                pass
+        for text in BUY_NOW_TEXTS:
+            try:
+                if self.bridge.click_text(text):
+                    return text
+            except Exception:
+                pass
+        return None
+
+    def _tap_plus(self, px, py, count):
+        """
+        点数量加号 count 次：新 APK 用一次手势派发多点（少 count-1 次
+        跨语言往返）；旧 APK/测试桩没有该方法时退回逐个 tap_px。
+        单次手势最多 8 个 stroke（Android 上限 10），多出的分批发。
+        返回实际点击次数。
+        """
+        count = int(count)
+        if count <= 0:
+            return 0
+        multi = getattr(self.bridge, "tap_multi_px", None)
+        done = 0
+        remaining = count
+        while remaining > 0:
+            chunk = min(remaining, 8)
+            used_multi = False
+            if callable(multi):
+                try:
+                    if multi(px, py, chunk, TAP_JITTER_PX):
+                        done += chunk
+                        remaining -= chunk
+                        used_multi = True
+                except Exception:
+                    multi = None
+            if used_multi:
+                continue
+            for _ in range(chunk):
+                try:
+                    self.bridge.tap_px(px, py, TAP_JITTER_PX)
+                    done += 1
+                except Exception:
+                    return done
+            remaining -= chunk
+        return done
 
     def _any_text(self, texts):
         """
@@ -384,17 +492,75 @@ class FlowCore(object):
         """是否出现「人数过多」这类并发 Toast（不停止点击，只统计）"""
         return self._any_text(SOFT_HINT_TEXTS)
 
+    def _handle_sale_time(self, hhmm, now):
+        """
+        读到按钮区开售时间后的统一处理（READ 和 YEAR 预检共用）：
+        - 未来时间：替换当前目标，回列表等到点再精确重进；
+        - 已过但仍在宽限内（默认同一小时）：退回列表立即重进刷新，
+          不把本场判成"已过"；
+        - 已过且超出宽限：顺延到次日同刻。
+        返回 True 表示已处理（调用方直接 return）。
+        """
+        try:
+            hour, minute = (int(v) for v in hhmm.split(u":"))
+        except ValueError:
+            return False
+        target = now.replace(
+            hour=hour, minute=minute, second=0, microsecond=0
+        )
+        if target <= now:
+            late = (now - target).total_seconds()
+            if late <= REENTER_GRACE_SECONDS:
+                self._reenter_count += 1
+                if self._reenter_count % 5 == 1:
+                    self._log(
+                        u"读到开售时间 %s（已过 %.1f 秒），按钮未刷新，"
+                        u"退出重进第 %d 次"
+                        % (hhmm, late, self._reenter_count)
+                    )
+                self.bridge.back()
+                # 目标仍是本场整点（已过），WAIT 下一拍立即重进
+                self.session_target = target
+                self.display_target = target
+                self._goto(
+                    WAIT_TIME,
+                    u"重新进入详情刷新按钮（第 %d 次）…"
+                    % self._reenter_count,
+                )
+                self._reenter_next_at = now + timedelta(
+                    seconds=REENTER_MIN_INTERVAL
+                )
+                return True
+            target = target + timedelta(days=1)
+            self._log(
+                u"读取到开售时间 %s（已过 %.0f 秒），顺延至次日 %s"
+                % (hhmm, late, target.strftime(u"%Y-%m-%d %H:%M"))
+            )
+        else:
+            self._reenter_count = 0
+            self._log(
+                u"读取到开售时间 %s（未来），返回列表，等待整点" % hhmm
+            )
+        self.bridge.back()
+        self.session_target = target
+        self.display_target = target
+        self._goto(
+            WAIT_TIME,
+            u"等待开售 %s" % target.strftime(u"%m-%d %H:%M"),
+        )
+        return True
+
     def _current_page(self):
         """
         任意页面接入：靠通用文字特征判定当前停在 i茅台 的哪个页面，
         全机型通用、不依赖 px。返回 detail/list/igou/home/unknown。
+        列表页必须认到完整商品名：只认「飞天」+「%vol」会把 i购
+        「全部」视图里的「鼓乐飞天」也当成目标商品。
         """
-        has_qty = self.bridge.text_exists(u"数量")
-        if has_qty:
+        if self.bridge.text_exists(u"数量"):
             return u"detail"
-        product_center = self.bridge.node_center(PRODUCT_KEYWORDS)
         has_jd = self.bridge.text_exists(JINGDIAN_TAB_TEXT)
-        if has_jd and product_center is not None:
+        if has_jd and self._product_center() is not None:
             return u"list"
         if has_jd:
             return u"igou"
@@ -445,11 +611,14 @@ class FlowCore(object):
             if center is not None:
                 self.recorded_pos = center
                 self._log(
-                    u"识别到当前在经典列表，点击「飞天」进入，位置 (%d, %d)"
+                    u"识别到当前在经典列表，点击目标商品进入，位置 (%d, %d)"
                     % center
                 )
-                self.bridge.click_node_by_parts(PRODUCT_KEYWORDS)
-                self._goto(SELECT_YEAR, u"已进入商品，识别年份规格…")
+                if self._click_product():
+                    self._goto(SELECT_YEAR, u"已进入商品，识别年份规格…")
+                    return
+                self._tick_stall(dt)
+                self.status = u"点击目标商品失败，重试…"
                 return
             # 判定在列表但未取到中心，下轮重试
             self._tick_stall(dt)
@@ -481,7 +650,6 @@ class FlowCore(object):
             return
 
         # unknown：冷启动/加载中，动态等待可识别页面出现
-        self._page_entry_retries += 1
         self._heartbeat_log(
             dt, u"等待 i茅台加载可识别页面（首页/i购/列表/详情）…"
         )
@@ -503,11 +671,14 @@ class FlowCore(object):
         if center is not None:
             self.recorded_pos = center
             self._log(
-                u"列表确认（全部/经典/精品），点击「飞天」进入，位置 (%d, %d)"
-                % center
+                u"列表确认（完整商品名+列表标签），点击商品进入，"
+                u"位置 (%d, %d)" % center
             )
-            self.bridge.click_node_by_parts(PRODUCT_KEYWORDS)
-            self._goto(SELECT_YEAR, u"已进入商品，识别年份规格…")
+            if self._click_product():
+                self._goto(SELECT_YEAR, u"已进入商品，识别年份规格…")
+                return
+            self._tick_stall(dt)
+            self.status = u"点击目标商品失败，重试…"
             return
 
         # 未确认在列表：可能弹窗未消失或停在详情页，无限等待
@@ -520,17 +691,29 @@ class FlowCore(object):
     # ---------------- SELECT_YEAR ----------------
     def _update_select_year(self, dt, now):
         """
-        进入详情页后第一步：在规格区域识别并点击 UI 选定的年份
-        （默认当前年份，如 2026），点击一次后再进入抢购按钮识别。
-        动态轮询：年份区域未渲染（加载中）就等待，不设固定等待。
-        兜底：若年份区域始终没出现、但抢购按钮区已出现可识别文字
-        （立即抢购/投放/售罄），直接放行到 READ，避免页面改版时卡死。
+        进入详情页后第一步：先读按钮区（1 次调用）判断这一页能不能买。
+        - 按钮还是「HH:MM投放」→ 不浪费时间选年份/数量，直接退回等待
+          （重进刷新按钮，READ 不会再被这些无效页面拖慢）；
+        - 按钮是「立即抢购」→ 选年份 → 数量 → 点抢购。
+        年份区未渲染就动态等待；页面改版时按钮已渲染且等满宽限才放行。
         """
         if not self.bridge.is_connected():
             self._finish(
                 False,
                 u"无障碍服务未开启，请先到设置中开启后重新定时",
             )
+            return
+
+        # 0) 预检按钮区：仍是投放时间就直接退回，不选年份/数量
+        hits = self.bridge.find_regex_in_px_region(
+            SALE_TIME_REGEX, self._button_region()
+        )
+        if hits:
+            self._log(
+                u"详情页按钮仍为 %s，不选年份/数量，直接退回等待"
+                % hits[0]
+            )
+            self._handle_sale_time(hits[0], now)
             return
 
         year = self.year_target or YEAR_TARGET_TEXT
@@ -541,12 +724,11 @@ class FlowCore(object):
         )
         region = self._region(u"year_cells", legacy_region, sub_key=year)
 
-        # 1) 该年份格区域内识别到目标年份 → 点击一次，进入数量修改
-        if self.bridge.text_exists_in_px_region(year, region):
+        # 1) 直接点该年份格：成功即进入数量修改（省掉一次存在性查询）
+        if self.bridge.click_text_in_px_region(year, region):
             self._log(
                 u"详情页识别到年份规格「%s」，点击选择年份" % year
             )
-            self.bridge.click_text_in_px_region(year, region)
             self._goto(SELECT_QTY, u"已选择年份%s，修改数量…" % year)
             return
 
@@ -642,19 +824,18 @@ class FlowCore(object):
                 self._goto(READ_DETAIL, u"数量修改异常，识别抢购按钮…")
                 return
             # 同一拍内连续点完需要的次数（加号节点无文字）：
-            # 档案加号中心优先，无档案退回 OPPO 固定中心
+            # 档案加号中心优先，无档案退回 OPPO 固定中心。
+            # 一次手势派发多点（新 APK），旧 APK 自动退回逐个点击。
             plus_center = self._profile_center(u"qty_plus") \
                 or QTY_PLUS_CENTER_PX
             px, py = plus_center
-            for _ in range(need):
-                if self._qty_taps >= QTY_MAX_TAPS:
-                    break
-                self.bridge.tap_px(px, py, TAP_JITTER_PX)
-                self._qty_taps += 1
+            need = min(need, QTY_MAX_TAPS - self._qty_taps)
+            done = self._tap_plus(px, py, need)
+            self._qty_taps += done
             self._log(
                 u"当前数量 %d 瓶，连续点击加号 %d 次（累计 %d 次），"
                 u"改为 %d 瓶"
-                % (value, need, self._qty_taps, QTY_TARGET)
+                % (value, done, self._qty_taps, QTY_TARGET)
             )
             self.status = u"修改数量 %d→%d…" % (value, QTY_TARGET)
             return
@@ -679,27 +860,26 @@ class FlowCore(object):
     # ---------------- READ_DETAIL ----------------
     def _update_read_detail(self, dt, now):
         """详情页：售罄结束；立即抢购点击；时间则安排或重侦"""
-        self._elapsed += dt
 
         # 1) 立即抢购：1 秒内识别并点击，随后进入连点模式
-        for text in BUY_NOW_TEXTS:
-            if self.bridge.click_text(text):
-                self._log(u"识别到「%s」，立即点击购买" % text)
-                self._soldout_pending = False
-                self._goto(
-                    RAPID_BUY,
-                    u"已点击购买，进入连点模式…",
-                )
-                # 第一下已在 READ 点出，下一次点击前先等一个
-                # 独立随机的 0.[X][X] 秒
-                self._rapid_wait_left = rapid_click_delay()
-                # 本轮连点达到该随机次数后自动 back 重进刷新
-                self._rapid_reenter_limit = rapid_reenter_count()
-                self._log(
-                    u"本轮自动重进阈值：连点 %d 次后返回上一层重进"
-                    % self._rapid_reenter_limit
-                )
-                return
+        hit = self._tap_buy()
+        if hit is not None:
+            self._log(u"识别到「%s」，立即点击购买" % hit)
+            self._soldout_pending = False
+            self._goto(
+                RAPID_BUY,
+                u"已点击购买，进入连点模式…",
+            )
+            # 第一下已在 READ 点出，下一次点击前先等一个
+            # 独立随机的 0.[X][X] 秒
+            self._rapid_wait_left = rapid_click_delay()
+            # 本轮连点达到该随机次数后自动 back 重进刷新
+            self._rapid_reenter_limit = rapid_reenter_count()
+            self._log(
+                u"本轮自动重进阈值：连点 %d 次后返回上一层重进"
+                % self._rapid_reenter_limit
+            )
+            return
 
         # 2) 已售罄：需二次确认——先返回列表重新进入，
         #    再次读到的按钮仍为售罄才结束（防 H5 缓存旧状态误判）
@@ -714,7 +894,6 @@ class FlowCore(object):
                     u"二次进入确认仍为「已售罄」，返回列表，结束启动器"
                 )
                 self.bridge.back()
-                self.request_app_exit = True
                 self._finish(True, u"商品已售罄（二次确认），启动器结束")
                 return
             self._soldout_pending = True
@@ -743,62 +922,8 @@ class FlowCore(object):
                 return
             # 读到有效时间，说明未售罄，撤销售罄复核标记
             self._soldout_pending = False
-            try:
-                hour, minute = (int(v) for v in hhmm.split(u":"))
-            except ValueError:
-                hour = minute = None
-            if hour is not None:
-                target = now.replace(
-                    hour=hour, minute=minute, second=0, microsecond=0
-                )
-                if target <= now:
-                    # 业务规则：详情页按钮只有在"整点整秒之后重新加载"
-                    # 才会刷新成「立即抢购」。重进后仍读到本场时间
-                    # （含刚过），说明这次加载没刷新到按钮，按同一条
-                    # 规则退出去再进；超过宽限才认为本场已结束。
-                    late = (now - target).total_seconds()
-                    if late <= REENTER_GRACE_SECONDS:
-                        self._reenter_count += 1
-                        if self._reenter_count % 5 == 1:
-                            self._log(
-                                u"读到开售时间 %s（已过 %.1f 秒），按钮未刷新，"
-                                u"退出重进第 %d 次"
-                                % (hhmm, late, self._reenter_count)
-                            )
-                        self.bridge.back()
-                        # 目标仍是本场整点（已过），WAIT 下一拍立即重进
-                        self.session_target = target
-                        self.display_target = target
-                        self._goto(
-                            WAIT_TIME,
-                            u"重新进入详情刷新按钮（第 %d 次）…"
-                            % self._reenter_count,
-                        )
-                        return
-                    target = target + timedelta(days=1)
-                    self._log(
-                        u"读取到开售时间 %s（已过 %.0f 秒），顺延至次日 %s"
-                        % (
-                            hhmm,
-                            late,
-                            target.strftime(u"%Y-%m-%d %H:%M"),
-                        )
-                    )
-                else:
-                    # 未来时间：今天的下一场，返回列表等整点
-                    self._reenter_count = 0
-                    self._log(
-                        u"读取到开售时间 %s（未来），返回列表，等待整点"
-                        % hhmm
-                    )
-                self.bridge.back()
-                self.session_target = target
-                self.display_target = target
-                self._goto(
-                    WAIT_TIME,
-                    u"等待开售 %s" % target.strftime(u"%m-%d %H:%M"),
-                )
-                return
+            self._handle_sale_time(hhmm, now)
+            return
 
         # 4) 按钮尚未刷新/弹窗遮挡：不中止、不返回，无限等待，
         #    每 5 秒记心跳；按钮一出现立即处理（识别在 1 秒内）。
@@ -856,23 +981,21 @@ class FlowCore(object):
             self._goto(ENTER_PRODUCT, u"售罄复核，重新进入确认…")
             return
 
-        # 3) 点一次
-        clicked = False
-        for text in BUY_NOW_TEXTS:
-            if self.bridge.click_text(text):
-                clicked = True
-                self._rapid_click_count += 1
-                if self._rapid_click_count == 1:
-                    self._log(
-                        u"连点模式：每点一次后随机等 0.[X][X] 秒"
-                        u"（X 各自 0-9）再点下一次，点击「%s」" % text
-                    )
-                elif self._rapid_click_count % 20 == 0:
-                    self._log(
-                        u"连点中：已点击「立即抢购」%d 次"
-                        % self._rapid_click_count
-                    )
-                break
+        # 3) 点一次（按钮区优先，失败退回全页节点点击）
+        hit = self._tap_buy()
+        clicked = hit is not None
+        if clicked:
+            self._rapid_click_count += 1
+            if self._rapid_click_count == 1:
+                self._log(
+                    u"连点模式：每点一次后随机等 0.[X][X] 秒"
+                    u"（X 各自 0-9）再点下一次，点击「%s」" % hit
+                )
+            elif self._rapid_click_count % 20 == 0:
+                self._log(
+                    u"连点中：已点击「立即抢购」%d 次"
+                    % self._rapid_click_count
+                )
 
         # 4) 点完立刻判界面变化：订单/支付页 → 成功（只上报不操作）
         if self._order_page_visible():
@@ -1013,6 +1136,30 @@ class FlowCore(object):
                 % self.session_target.strftime(u"%H:%M:%S")
             return
 
+        # 重进节流：两次刷新重进之间至少间隔 REENTER_MIN_INTERVAL
+        if self._reenter_next_at is not None:
+            if now < self._reenter_next_at:
+                self.status = (
+                    u"等待重进刷新（还剩 %.1f 秒）…"
+                    % (self._reenter_next_at - now).total_seconds()
+                )
+                return
+            self._reenter_next_at = None
+
+        # 整点快速入页：不在详情页时，直接按完整商品名点一次
+        # （1~2 次调用），不再做整页扫描；点中后只等「数量」出现。
+        # 每个 WAIT 周期只尝试一次，失败再退回下面的页面判定。
+        if not self._slot_fast_done:
+            self._slot_fast_done = True
+            if not self.bridge.text_exists(u"数量") \
+                    and self._click_product():
+                self._log(
+                    u"开售整点到达，直接点击目标商品进入详情"
+                    u"（零扫描，跳过页面判定）"
+                )
+                self._goto(WAIT_DETAIL, u"整点已到，等待详情页…")
+                return
+
         page = self._current_page()
         if page != u"detail":
             self._detail_backs = 0
@@ -1047,10 +1194,10 @@ class FlowCore(object):
                 self.status = u"整点列表确认中…"
                 return
             self.recorded_pos = center
-            # 节点优先：点击飞天文字节点
-            if self.bridge.click_node_by_parts(PRODUCT_KEYWORDS):
+            # 目标商品优先（档案卡位+全称），失败再按坐标兜底
+            if self._click_product():
                 self._log(
-                    u"开售整点到达，节点点击「飞天」进入，位置 (%d, %d)"
+                    u"开售整点到达，节点点击目标商品进入，位置 (%d, %d)"
                     % center
                 )
             elif self.recorded_pos is not None:
@@ -1067,20 +1214,35 @@ class FlowCore(object):
         self._log(u"开售整点到达，当前在 %s，快速接入" % page)
         self._goto(NAVIGATE_IGOU, u"整点已到，快速接入…")
 
-    # ---------------- RE_SCOUT ----------------
-    def _update_re_scout(self, dt, now):
-        """已过时间：间隔后重新进入商品读取下一场"""
-        self._elapsed += dt
-        if self._elapsed >= RE_SCOUT_INTERVAL:
-            center = self._list_ready()
-            if center is not None:
-                self.recorded_pos = center
-                self._log(
-                    u"重新侦察：点击商品进入，位置 (%d, %d)" % center
-                )
-                self.bridge.click_node_by_parts(PRODUCT_KEYWORDS)
-                self._goto(SELECT_YEAR, u"重新侦察，先识别年份规格…")
-                return
-            # 列表还没准备好：再等一个间隔
-            self._log(u"重新侦察：列表未出现商品，继续等待…")
-            self._elapsed = 0.0
+    # ---------------- WAIT_DETAIL ----------------
+    def _update_wait_detail(self, dt, now):
+        """
+        整点快速入页后：等详情页渲染。
+        只查「数量」是否出现（1 次调用），每 DETAIL_ENTER_POLL 秒查一次；
+        超时（DETAIL_ENTER_TIMEOUT）退回页面识别，避免点空后卡死。
+        """
+        if not self.bridge.is_connected():
+            self._finish(
+                False, u"无障碍服务未开启，请先到设置中开启后重新定时"
+            )
+            return
+
+        self._detail_enter_elapsed += dt
+        if self._detail_enter_next > 0.0:
+            self._detail_enter_next -= dt
+            self.status = u"等待详情页加载…"
+            return
+        self._detail_enter_next = DETAIL_ENTER_POLL
+
+        if self.bridge.text_exists(u"数量"):
+            self._log(u"已进入详情页，开始识别年份规格")
+            self._goto(SELECT_YEAR, u"已进入商品，识别年份规格…")
+            return
+
+        if self._detail_enter_elapsed >= DETAIL_ENTER_TIMEOUT:
+            self._log(u"等待详情页超时，退回页面识别重进")
+            self._goto(NAVIGATE_IGOU, u"详情未打开，重新接入…")
+            return
+
+        self.status = u"等待详情页加载…"
+

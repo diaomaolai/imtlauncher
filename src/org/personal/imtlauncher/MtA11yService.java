@@ -429,6 +429,44 @@ public class MtA11yService extends AccessibilityService {
         return dispatchPath(path, holdMs);
     }
 
+    /**
+     * 在同一位置连续点击 count 次，一次手势派发完成（数量加号用）。
+     * 每次间隔 gapMs（建议 120~160ms），每下都有独立抖动与轻微位移，
+     * 避免被系统识别成双击缩放；比 Python 侧循环调用 tapPxHuman
+     * 少 count-1 次跨语言往返。
+     */
+    public boolean tapMultiPxHuman(int x, int y, int count,
+                                   int jitterPx, long gapMs) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N || count <= 0) {
+            return false;
+        }
+        DisplayMetrics m = realMetrics();
+        GestureDescription.Builder builder = new GestureDescription.Builder();
+        long start = 0L;
+        long gap = Math.max(60L, gapMs);
+        // StrokeDescription 数量有系统上限（getMaxStrokeCount，通常 10）
+        int strokes = Math.min(count, GestureDescription.getMaxStrokeCount());
+        for (int i = 0; i < strokes; i++) {
+            float fx = clamp(
+                    x + (mRandom.nextFloat() * 2f - 1f) * jitterPx,
+                    0, m.widthPixels - 1);
+            float fy = clamp(
+                    y + (mRandom.nextFloat() * 2f - 1f) * jitterPx,
+                    0, m.heightPixels - 1);
+            Path path = new Path();
+            path.moveTo(fx, fy);
+            float driftX = (mRandom.nextFloat() * 2f - 1f) * 4f;
+            float driftY = (mRandom.nextFloat() * 2f - 1f) * 4f;
+            path.lineTo(fx + driftX, fy + driftY);
+            long holdMs = 45L + mRandom.nextInt(36); // 45~80ms
+            builder.addStroke(
+                    new GestureDescription.StrokeDescription(
+                            path, start, holdMs));
+            start += gap;
+        }
+        return dispatchGestureWithResult(builder.build());
+    }
+
     /** 对第一个可滚动控件执行一次"前滚"（列表向下/内容上移） */
     public boolean scrollForwardOnce() {
         for (AccessibilityNodeInfo root : roots()) {
