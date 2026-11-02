@@ -47,10 +47,11 @@ class RapidBridge(object):
     def text_exists(self, text):
         if text in (u"已售罄", u"已售磬"):
             return self.soldout
-        return text in self.texts
+        # 真机语义：控件文字「包含」即命中
+        return any(text in t for t in self.texts)
 
     def any_text_exists(self, texts):
-        return any(text in self.texts for text in texts)
+        return any(self.text_exists(text) for text in texts)
 
     def click_text(self, text):
         if text == BUY and BUY in self.texts:
@@ -152,6 +153,26 @@ class RapidClickTest(unittest.TestCase):
         self._run(2.0)
         self.assertEqual(self.flow.state, RAPID_BUY)
         self.assertGreater(self.bridge.buy_clicks, clicks)
+
+    def test_soft_hint_keeps_clicking(self):
+        """「人数过多」Toast：不停止点击、不改节奏，只记日志"""
+        self._run(3.0)
+        before = self.bridge.buy_clicks
+        self.bridge.texts.add(u"当前人数过多")
+        self._run(3.0)
+        self.assertEqual(self.flow.state, RAPID_BUY)
+        self.assertGreater(self.bridge.buy_clicks, before)
+        self.assertTrue(
+            any(u"人数过多" in line for line in self.logs),
+            u"未记录人数过多提示：%s" % self.logs[-5:],
+        )
+
+    def test_generic_page_text_not_treated_as_verify(self):
+        """详情页正常文案『请选择年份』不能被当成验证弹窗而停手"""
+        self.bridge.texts.add(u"请选择年份")
+        self._run(3.0)
+        self.assertEqual(self.flow.state, RAPID_BUY)
+        self.assertGreater(self.bridge.buy_clicks, 3)
 
     def test_sold_out_goes_to_recheck(self):
         """售罄仍走二次复核"""

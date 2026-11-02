@@ -58,8 +58,14 @@ from config import (
     LIST_MARKER_TEXTS,
     VERIFY_POPUP_TEXTS,
     ORDER_PAGE_TEXTS,
+    SOFT_HINT_TEXTS,
+    SOFT_HINT_LOG_INTERVAL,
+    SOFT_HINT_CHECK_EVERY,
     VERIFY_POLL_INTERVAL,
     rapid_click_delay,
+    rapid_reenter_count,
+    ENTRY_CONTROL_GRACE_SECONDS,
+    RAPID_REENTER_MAX_ROUNDS,
     SOLD_OUT_TEXTS,
     SALE_TIME_REGEX,
     RE_SCOUT_INTERVAL,
@@ -130,6 +136,9 @@ class FlowCore(object):
         self._rapid_misses = 0
         # 安全验证弹窗等待态的轮询计时
         self._verify_elapsed = 0.0
+        # 并发提示（人数过多 Toast）：出现次数 + 上次记日志时刻
+        self._soft_hint_count = 0
+        self._soft_hint_logged = None
         # 整点重进计数 / 详情页退回次数（日志与防死循环用）
         self._reenter_count = 0
         self._detail_backs = 0
@@ -146,6 +155,11 @@ class FlowCore(object):
         self.launch_target = None
         # 任意页面接入：导航重试计数
         self._page_entry_retries = 0
+        # 详情页年份/数量控件等待宽限累计（跨 YEAR/QTY，不被 _goto 清）
+        self._entry_wait = 0.0
+        # 本轮自动重进的点击阈值 + 已重进轮次（防死循环）
+        self._rapid_reenter_limit = 0
+        self._rapid_reenter_rounds = 0
 
     # ---------------- 日志 ----------------
     def _log(self, message):
@@ -240,10 +254,15 @@ class FlowCore(object):
         self._rapid_wait_left = 0.0
         self._rapid_misses = 0
         self._verify_elapsed = 0.0
+        self._soft_hint_count = 0
+        self._soft_hint_logged = None
         self._reenter_count = 0
         self._detail_backs = 0
         self._qty_taps = 0
         self._page_entry_retries = 0
+        self._entry_wait = 0.0
+        self._rapid_reenter_limit = 0
+        self._rapid_reenter_rounds = 0
         self._log(
             u"已设置定时，开售时刻 %s，计划拉起时刻 %s"
             % (
@@ -258,8 +277,13 @@ class FlowCore(object):
 
     def _finish(self, success, message):
         self.success = success
-        self.status = message
         self.state = DONE
+        # 复盘用：本场被并发提示挡了多少次
+        if self._soft_hint_count:
+            message = u"%s（本场出现人数过多提示 %d 次）" % (
+                message, self._soft_hint_count
+            )
+        self.status = message
         self._log(u"流程结束：%s" % message)
 
     # ---------------- 主循环 ----------------
@@ -301,6 +325,9 @@ class FlowCore(object):
         self._verify_elapsed = 0.0
         self._qty_taps = 0
         self._stall_seconds = 0.0
+        # 每次新进入详情页链路，重置年份/数量控件的等待宽限
+        if state == SELECT_YEAR:
+            self._entry_wait = 0.0
         # 注意：_soldout_pending 不在此重置，售罄复核要跨 ENTER→READ 保留
 
     def _heartbeat_log(self, dt, message):
@@ -352,6 +379,10 @@ class FlowCore(object):
     def _order_page_visible(self):
         """界面是否已刷新成订单/支付页（点击被受理的成功证据）"""
         return self._any_text(ORDER_PAGE_TEXTS)
+
+    def _soft_hint_visible(self):
+        """是否出现「人数过多」这类并发 Toast（不停止点击，只统计）"""
+        return self._any_text(SOFT_HINT_TEXTS)
 
     def _current_page(self):
         """
@@ -532,14 +563,18 @@ class FlowCore(object):
                 ):
                     button_ready = True
                     break
-        if button_ready:
+        # 2) 兜底：按钮已渲染且等待超过宽限（页面确实改版），
+        #    才放行；宽限内即使按钮先出现也坚持等年份，防止跳过
+        if button_ready and self._entry_wait >= ENTRY_CONTROL_GRACE_SECONDS:
             self._log(
-                u"未找到年份规格区域，但抢购按钮已出现，尝试数量修改"
+                u"等待 %.1f 秒仍无年份规格区域，按钮已出现，"
+                u"跳过年份尝试数量修改" % self._entry_wait
             )
             self._goto(SELECT_QTY, u"跳过年份，修改数量…")
             return
 
-        # 3) 详情页加载中：动态等待年份区域出现
+        # 3) 详情页加载中（含按钮先渲染但宽限未到）：动态等待
+        self._entry_wait += dt
         self._heartbeat_log(
             dt,
             u"等待详情页年份规格区域渲染（年份「%s」）…" % year,
@@ -624,13 +659,17 @@ class FlowCore(object):
             self.status = u"修改数量 %d→%d…" % (value, QTY_TARGET)
             return
 
-        # 读不到数量：按钮已渲染则放行，否则等待详情页加载
-        if self._button_ready():
+        # 读不到数量：按钮已渲染且等待超过宽限（页面改版）才放行；
+        # 宽限内坚持等数量控件，保证正常加载时一定改 6 瓶
+        if self._button_ready() \
+                and self._entry_wait >= ENTRY_CONTROL_GRACE_SECONDS:
             self._log(
-                u"未找到数量控件，但抢购按钮已出现，直接识别按钮"
+                u"等待 %.1f 秒仍无数量控件，按钮已出现，直接识别按钮"
+                % self._entry_wait
             )
             self._goto(READ_DETAIL, u"跳过数量，识别抢购按钮…")
             return
+        self._entry_wait += dt
         self._heartbeat_log(
             dt, u"等待详情页数量区域渲染…"
         )
@@ -654,6 +693,12 @@ class FlowCore(object):
                 # 第一下已在 READ 点出，下一次点击前先等一个
                 # 独立随机的 0.[X][X] 秒
                 self._rapid_wait_left = rapid_click_delay()
+                # 本轮连点达到该随机次数后自动 back 重进刷新
+                self._rapid_reenter_limit = rapid_reenter_count()
+                self._log(
+                    u"本轮自动重进阈值：连点 %d 次后返回上一层重进"
+                    % self._rapid_reenter_limit
+                )
                 return
 
         # 2) 已售罄：需二次确认——先返回列表重新进入，
@@ -843,7 +888,21 @@ class FlowCore(object):
             self._goto(WAIT_VERIFY, u"安全验证弹窗，等待人工处理…")
             return
 
-        # 6) 没点中：连续多次说明页面已变，回详情重新识别
+        # 6) 并发提示（人数过多 Toast）：页面不变，继续点，只统计+节流日志。
+        #    每 SOFT_HINT_CHECK_EVERY 次点击才多付一次全树扫描。
+        if clicked and self._rapid_click_count % SOFT_HINT_CHECK_EVERY == 0 \
+                and self._soft_hint_visible():
+            self._soft_hint_count += 1
+            last = self._soft_hint_logged
+            if last is None or (now - last).total_seconds() \
+                    >= SOFT_HINT_LOG_INTERVAL:
+                self._soft_hint_logged = now
+                self._log(
+                    u"出现「人数过多」类提示（第 %d 次），"
+                    u"继续按 0.[X][X] 秒间隔点击" % self._soft_hint_count
+                )
+
+        # 7) 没点中：连续多次说明页面已变，回详情重新识别
         if not clicked:
             self._rapid_misses += 1
             if self._rapid_misses >= 3:
@@ -856,7 +915,33 @@ class FlowCore(object):
         else:
             self._rapid_misses = 0
 
-        # 7) 安排下一次点击的独立随机间隔
+        # 7.5) 自动重进：成功点击达到随机阈值，back 返回上一层再
+        #      重进详情刷新按钮（替代手动返回）。订单页/验证弹窗/
+        #      售罄已在前面优先处理，这里只处理"页面无变化"的情况。
+        if clicked and self._rapid_reenter_limit > 0 \
+                and self._rapid_click_count >= self._rapid_reenter_limit:
+            if self._rapid_reenter_rounds < RAPID_REENTER_MAX_ROUNDS:
+                self._rapid_reenter_rounds += 1
+                self._log(
+                    u"已连点 %d 次（阈值 %d），自动返回上一层再重进"
+                    u"详情刷新（第 %d 轮）"
+                    % (self._rapid_click_count,
+                       self._rapid_reenter_limit,
+                       self._rapid_reenter_rounds)
+                )
+                self.bridge.back()
+                # 重进后 ENTER→YEAR→QTY（重新改 6 瓶）→READ→RAPID
+                self._goto(
+                    ENTER_PRODUCT,
+                    u"连点达阈值，自动返回重进刷新…",
+                )
+                return
+            self._log(
+                u"自动重进已达 %d 轮上限，停止重进继续连点"
+                % RAPID_REENTER_MAX_ROUNDS
+            )
+
+        # 8) 安排下一次点击的独立随机间隔
         self._rapid_wait_left = rapid_click_delay()
         self.status = (
             u"已点 %d 次，%.2f 秒后点下一次…"
