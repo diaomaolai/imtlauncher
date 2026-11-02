@@ -51,8 +51,12 @@ class DetailBridge(object):
         return None
 
     def text_exists(self, text):
-        # _current_page 判 detail 靠"数量"
-        return text == u"数量" and self.spec_ready
+        # _current_page 判 detail 靠"数量"；按钮文字也要能被全局找到
+        if text == u"数量":
+            return self.spec_ready
+        if text in (u"立即抢购", u"立即购买"):
+            return self.button_ready_flag
+        return False
 
     def any_text_exists(self, texts):
         return any(self.text_exists(t) for t in texts)

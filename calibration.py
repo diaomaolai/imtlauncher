@@ -21,6 +21,8 @@ from config import (
     BUY_NOW_TEXTS,
     SOLD_OUT_TEXTS,
     SALE_TIME_REGEX,
+    BUTTON_TIME_EXACT_REGEX,
+    BUTTON_EXPLAIN_KEYWORDS,
     YEAR_CHOICES,
     IGOU_TAB_TEXT,
     IGOU_CATEGORY_TEXTS,
@@ -300,22 +302,6 @@ class DeviceCalibrator(object):
                 records[name] = record
         return records
 
-    def _button_state_text(self, tree):
-        """当前按钮处于哪种状态：投放时间 / 立即抢购 / 已售罄"""
-        pattern = re.compile(SALE_TIME_REGEX)
-        for node in tree.nodes.values():
-            text = node.get(u"t") or u""
-            if not text or not tree.has_real_bounds(node):
-                continue
-            matched = pattern.search(text)
-            if matched:
-                return u"投放时间 %s" % matched.group()
-            if any(mark in text for mark in BUY_NOW_TEXTS):
-                return u"立即抢购"
-            if any(mark in text for mark in SOLD_OUT_TEXTS):
-                return u"已售罄"
-        return u"未识别"
-
     def _year_records(self, tree):
         records = {}
         for node in tree.nodes.values():
@@ -366,24 +352,69 @@ class DeviceCalibrator(object):
             self._record(tree, plus),
         )
 
-    def _button_record(self, tree):
-        pattern = re.compile(SALE_TIME_REGEX)
-        best = None
+    def _button_node(self, tree):
+        """
+        找抢购按钮节点（实拍：灰色圆角框，文字整段 "09:00投放"）。
+
+        干扰：按钮上方有一段整段说明「每日09:00、20:00投放」，它
+        "包含" 20:00投放，旧的包含匹配会把说明文字当成按钮。
+        优先级：
+        1) 整段就是 "xx:xx投放" 的节点（按钮）；
+        2) 立即抢购 / 已售罄；
+        3) 兜底才用包含匹配，且排除带「每日/限购/每人/、」的说明段落。
+        同一优先级取最靠下的节点。
+        """
+        exact = re.compile(BUTTON_TIME_EXACT_REGEX)
+        loose = re.compile(SALE_TIME_REGEX)
+        groups = {0: [], 1: [], 2: []}
         for node in tree.nodes.values():
-            text = node.get(u"t") or u""
-            if not text or not tree.has_real_bounds(node):
+            if not tree.has_real_bounds(node):
                 continue
-            matched = bool(pattern.search(text)) \
-                or any(mark in text for mark in BUY_NOW_TEXTS) \
-                or any(mark in text for mark in SOLD_OUT_TEXTS)
-            if not matched:
+            text = (node.get(u"t") or u"").strip()
+            if not text:
                 continue
-            if best is None \
-                    or tree.bounds(node)[3] > tree.bounds(best)[3]:
-                best = node
-        if best is None:
+            if exact.fullmatch(text):
+                groups[0].append(node)
+            elif any(mark in text for mark in BUY_NOW_TEXTS) \
+                    or any(mark in text for mark in SOLD_OUT_TEXTS):
+                groups[1].append(node)
+        if not groups[0] and not groups[1]:
+            for node in tree.nodes.values():
+                if not tree.has_real_bounds(node):
+                    continue
+                text = (node.get(u"t") or u"").strip()
+                if not text \
+                        or any(k in text for k in BUTTON_EXPLAIN_KEYWORDS):
+                    continue
+                if loose.search(text):
+                    groups[2].append(node)
+        for priority in (0, 1, 2):
+            if groups[priority]:
+                return max(
+                    groups[priority], key=lambda n: tree.bounds(n)[3]
+                )
+        return None
+
+    def _button_record(self, tree):
+        node = self._button_node(tree)
+        if node is None:
             return {}
-        return self._record(tree, best)
+        return self._record(tree, node)
+
+    def _button_state_text(self, tree):
+        """当前按钮处于哪种状态：投放时间 / 立即抢购 / 已售罄"""
+        node = self._button_node(tree)
+        if node is None:
+            return u"未识别"
+        text = (node.get(u"t") or u"").strip()
+        matched = re.search(r"\d{1,2}:\d{2}", text)
+        if matched:
+            return u"投放时间 %s" % matched.group()
+        if any(mark in text for mark in BUY_NOW_TEXTS):
+            return u"立即抢购"
+        if any(mark in text for mark in SOLD_OUT_TEXTS):
+            return u"已售罄"
+        return u"未识别"
 
     # ---------------- 主流程 ----------------
 

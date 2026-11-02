@@ -231,6 +231,15 @@ class Phone(object):
             return []
         return []
 
+    def find_exact_regex_texts(self, regex):
+        """新 APK 的整段匹配：只有按钮整段 "09:00投放" 会命中"""
+        self._cost()
+        if self.page != u"detail":
+            return []
+        if self.detail_button.endswith(u"投放"):
+            return [self.slot]
+        return []
+
     def tap_px(self, x, y, jitter=6):
         self._cost()
         if self.page == u"detail" and abs(x - self.plus_c[0]) < 25 \

@@ -404,6 +404,66 @@ public class MtA11yService extends AccessibilityService {
     }
 
     /**
+     * 全页扫描"整段文本"匹配正则的控件（matcher.matches），返回捕获
+     * 分组（如 09:00），按控件底边由下往上排序。
+     *
+     * 读按钮上的投放时间必须用它：按钮文字是整段 "09:00投放"，
+     * 而按钮上方的说明文字「每日09:00、20:00投放」只是"包含"，
+     * 整段匹配不会命中说明文字，避免把 20:00 误当成按钮时间。
+     * 捕获分组用于只取时间部分（09:00），不带"投放"后缀。
+     */
+    public String[] findExactRegexTexts(String regex) {
+        Pattern pattern;
+        try {
+            pattern = Pattern.compile(regex);
+        } catch (Exception e) {
+            return new String[0];
+        }
+        Map<String, Integer> bottomByText = new HashMap<>();
+        for (AccessibilityNodeInfo root : roots()) {
+            collectExactRegex(root, pattern, bottomByText);
+            recycle(root);
+        }
+        return orderByBottom(bottomByText);
+    }
+
+    private void collectExactRegex(AccessibilityNodeInfo node, Pattern pattern,
+                                   Map<String, Integer> out) {
+        if (node == null) {
+            return;
+        }
+        collectExactOne(node.getText(), node, pattern, out);
+        collectExactOne(node.getContentDescription(), node, pattern, out);
+        int count = node.getChildCount();
+        for (int i = 0; i < count; i++) {
+            collectExactRegex(node.getChild(i), pattern, out);
+        }
+    }
+
+    private void collectExactOne(CharSequence source, AccessibilityNodeInfo node,
+                                 Pattern pattern, Map<String, Integer> out) {
+        if (source == null) {
+            return;
+        }
+        String value = source.toString().trim();
+        if (value.length() == 0) {
+            return;
+        }
+        Matcher matcher = pattern.matcher(value);
+        if (!matcher.matches()) {
+            return;
+        }
+        String hit = matcher.groupCount() >= 1
+                ? matcher.group(1) : matcher.group(0);
+        Rect rect = new Rect();
+        node.getBoundsInScreen(rect);
+        Integer prev = out.get(hit);
+        if (prev == null || rect.bottom > prev) {
+            out.put(hit, rect.bottom);
+        }
+    }
+
+    /**
      * 按绝对屏幕像素点击（坐标直接填值，不做比例换算）。
      * 落点在 jitterPx 像素内小幅随机、按压时长随机、轻微位移。
      */
@@ -735,6 +795,102 @@ public class MtA11yService extends AccessibilityService {
             }
         } catch (InterruptedException e) {
             return false;
+        }
+        return result[0];
+    }
+
+    /**
+     * 截取当前屏幕，返回指定像素区域的平均颜色（RGB），失败返回 null。
+     * 仅 Android 11（API 30）及以上支持。
+     *
+     * 用途：按按钮填充色判断状态（灰色=不可点 / 黄橙=立即抢购）。
+     * 不同品牌宽高不同，不看"按钮在说明文字上方还是下方"，只看
+     * 校准得到的按钮 bounds 内的填充色。采样按区域取步长（最多约
+     * 16×6 个点），避免逐像素太慢。
+     */
+    public int[] averageColorInPxRegion(final int minX, final int minY,
+                                        final int maxX, final int maxY) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return null;
+        }
+        final CountDownLatch latch = new CountDownLatch(1);
+        final int[][] result = new int[][]{null};
+        try {
+            takeScreenshot(Display.DEFAULT_DISPLAY,
+                    getMainExecutor(), new TakeScreenshotCallback() {
+                    @Override
+                    public void onSuccess(ScreenshotResult screenshot) {
+                        Bitmap hardware = null;
+                        Bitmap software = null;
+                        try {
+                            hardware = Bitmap.wrapHardwareBuffer(
+                                    screenshot.getHardwareBuffer(),
+                                    screenshot.getColorSpace());
+                            if (hardware == null) {
+                                return;
+                            }
+                            software = hardware.copy(
+                                    Bitmap.Config.ARGB_8888, false);
+                            if (software == null) {
+                                return;
+                            }
+                            int width = software.getWidth();
+                            int height = software.getHeight();
+                            int left = Math.max(0, minX);
+                            int top = Math.max(0, minY);
+                            int right = Math.min(width - 1, maxX);
+                            int bottom = Math.min(height - 1, maxY);
+                            if (right <= left || bottom <= top) {
+                                return;
+                            }
+                            int stepX = Math.max(1, (right - left) / 16);
+                            int stepY = Math.max(1, (bottom - top) / 6);
+                            long sumR = 0L;
+                            long sumG = 0L;
+                            long sumB = 0L;
+                            int count = 0;
+                            for (int y = top; y <= bottom; y += stepY) {
+                                for (int x = left; x <= right; x += stepX) {
+                                    int pixel = software.getPixel(x, y);
+                                    sumR += (pixel >> 16) & 0xFF;
+                                    sumG += (pixel >> 8) & 0xFF;
+                                    sumB += pixel & 0xFF;
+                                    count++;
+                                }
+                            }
+                            if (count > 0) {
+                                result[0] = new int[]{
+                                        (int) (sumR / count),
+                                        (int) (sumG / count),
+                                        (int) (sumB / count)};
+                            }
+                        } catch (Exception e) {
+                            result[0] = null;
+                        } finally {
+                            if (software != null) {
+                                software.recycle();
+                            }
+                            if (hardware != null) {
+                                hardware.recycle();
+                            }
+                            latch.countDown();
+                        }
+                    }
+
+                    @Override
+                    public void onFailure(int errorCode) {
+                        latch.countDown();
+                    }
+                });
+        } catch (Exception e) {
+            return null;
+        }
+        try {
+            if (!latch.await(3, TimeUnit.SECONDS)) {
+                return null;
+            }
+        } catch (InterruptedException e) {
+            return null;
         }
         return result[0];
     }

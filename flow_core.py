@@ -49,6 +49,7 @@
 全程通过 AppLogger 打印并写入 txt 日志。
 """
 
+import time
 from datetime import timedelta
 
 from config import (
@@ -68,6 +69,16 @@ from config import (
     RAPID_REENTER_MAX_ROUNDS,
     SOLD_OUT_TEXTS,
     SALE_TIME_REGEX,
+    BUTTON_TIME_EXACT_REGEX,
+    BUTTON_COLOR_BUY_R_MIN,
+    BUTTON_COLOR_BUY_G_MIN,
+    BUTTON_COLOR_BUY_B_MAX,
+    BUTTON_COLOR_BUY_RB_MIN,
+    BUTTON_COLOR_GRAY_SPREAD_MAX,
+    BUTTON_COLOR_GRAY_MIN,
+    BUTTON_COLOR_GRAY_MAX,
+    BUTTON_COLOR_CACHE_SECONDS,
+    BUTTON_GRAY_REENTER_SECONDS,
     REENTER_GRACE_SECONDS,
     REENTER_MIN_INTERVAL,
     DETAIL_ENTER_TIMEOUT,
@@ -163,6 +174,12 @@ class FlowCore(object):
         self._detail_enter_next = 0.0
         # 重进刷新的最小间隔：下一次允许重进的最早时刻
         self._reenter_next_at = None
+        # 按钮取色缓存：颜色状态（buy/gray/None）+ 采样时刻
+        self._color_cache = None
+        self._color_cache_at = 0.0
+        self._color_state_last = None
+        # 灰色按钮已持续秒数（超过阈值退回列表重新进入）
+        self._gray_elapsed = 0.0
 
     # ---------------- 日志 ----------------
     def _log(self, message):
@@ -214,6 +231,114 @@ class FlowCore(object):
 
     def _button_region(self):
         return self._region(u"action_button", BUTTON_REGION_PX)
+
+    def _button_time_hits(self):
+        """
+        读按钮上的投放时间，返回 ["09:00"] 这样的列表。
+
+        干扰（实拍确认）：按钮上方有一段整段说明文字
+        「每日09:00、20:00投放」，其中 "20:00投放" 会被前瞻正则
+        SALE_TIME_REGEX 命中，若按"区域包含"扫描就会把 20:00 误当成
+        按钮时间，导致后续等错场次。
+
+        处理：
+        1) 优先整段精确匹配（Java findExactRegexTexts + 捕获分组）：
+           只有按钮那种整段 "09:00投放" 会命中，说明段落不会；
+        2) 旧 APK 没有该方法（返回 None）才退回按钮区域扫描
+           （区域本身已收窄，且不再做兜底拼接）。
+        """
+        exact = getattr(self.bridge, "find_exact_regex_texts", None)
+        if callable(exact):
+            try:
+                hits = exact(BUTTON_TIME_EXACT_REGEX)
+            except Exception:
+                hits = None
+            if hits is not None:
+                # [] 表示"页面确实没有按钮时间"，不能再退回区域扫描，
+                # 否则会读到说明文字里的 20:00
+                return [h for h in hits if h]
+        return self.bridge.find_regex_in_px_region(
+            SALE_TIME_REGEX, self._button_region()
+        )
+
+    # ---------------- 按钮颜色状态（不看上下位置） ----------------
+    def _button_center(self):
+        """按钮中心（档案优先，无档案用 OPPO 固定按钮区中心）"""
+        center = self._profile_center(u"action_button")
+        if center is not None:
+            return center
+        left, top, right, bottom = BUTTON_REGION_PX
+        return (left + right) // 2, (top + bottom) // 2
+
+    def _button_sample_region(self):
+        """
+        取色区域：按钮内部左侧竖带（避开中间文字笔画与圆角边框）。
+        不同品牌宽高不同，但都来自档案里这颗按钮的 bounds，
+        因此与"按钮在说明文字上方还是下方"无关。
+        """
+        bounds = self._profile_bounds(u"action_button") or BUTTON_REGION_PX
+        left, top, right, bottom = [int(v) for v in bounds]
+        width = max(1, right - left)
+        height = max(1, bottom - top)
+        x1 = left + max(6, int(width * 0.06))
+        x2 = left + max(12, int(width * 0.20))
+        y1 = top + int(height * 0.25)
+        y2 = top + int(height * 0.75)
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return (x1, y1, x2, y2)
+
+    def _sample_button_rgb(self):
+        """按缓存取按钮填充色，返回 (r, g, b)；取不到返回 None"""
+        now = time.monotonic()
+        if self._color_cache_at \
+                and now - self._color_cache_at < BUTTON_COLOR_CACHE_SECONDS:
+            return self._color_cache
+        sampler = getattr(self.bridge, "average_color_in_px_region", None)
+        if not callable(sampler):
+            return None
+        region = self._button_sample_region()
+        if region is None:
+            return None
+        try:
+            rgb = sampler(region)
+        except Exception:
+            rgb = None
+        self._color_cache_at = now
+        self._color_cache = rgb
+        return rgb
+
+    def _button_color_state(self):
+        """
+        按钮填充色 → buy / gray / None（未知）。
+        灰：已售罄 / xx:xx投放 / xx:xx备货中 —— 不可点；
+        黄橙：立即抢购 —— 可点；
+        未知（旧 APK、截图失败、颜色不典型）→ 调用方退回纯文字判断。
+        """
+        rgb = self._sample_button_rgb()
+        if rgb is None:
+            return None
+        red, green, blue = rgb
+        if red >= BUTTON_COLOR_BUY_R_MIN \
+                and green >= BUTTON_COLOR_BUY_G_MIN \
+                and blue <= BUTTON_COLOR_BUY_B_MAX \
+                and (red - blue) >= BUTTON_COLOR_BUY_RB_MIN:
+            state = u"buy"
+        elif max(rgb) - min(rgb) <= BUTTON_COLOR_GRAY_SPREAD_MAX \
+                and BUTTON_COLOR_GRAY_MIN <= red <= BUTTON_COLOR_GRAY_MAX:
+            state = u"gray"
+        else:
+            state = None
+        if state != self._color_state_last:
+            self._color_state_last = state
+            self._log(
+                u"按钮取色 RGB=(%d,%d,%d) → %s"
+                % (red, green, blue,
+                   {u"buy": u"黄/橙，可点",
+                    u"gray": u"灰，不可点",
+                    None: u"未知，按文字判断"}[state])
+            )
+        return state
 
     def _tick_stall(self, dt):
         """等待分支累计停滞；超阈值请求自动重校"""
@@ -267,6 +392,10 @@ class FlowCore(object):
         self._detail_enter_elapsed = 0.0
         self._detail_enter_next = 0.0
         self._reenter_next_at = None
+        self._color_cache = None
+        self._color_cache_at = 0.0
+        self._color_state_last = None
+        self._gray_elapsed = 0.0
         self._log(
             u"已设置定时，开售时刻 %s，计划拉起时刻 %s"
             % (
@@ -705,9 +834,7 @@ class FlowCore(object):
             return
 
         # 0) 预检按钮区：仍是投放时间就直接退回，不选年份/数量
-        hits = self.bridge.find_regex_in_px_region(
-            SALE_TIME_REGEX, self._button_region()
-        )
+        hits = self._button_time_hits()
         if hits:
             self._log(
                 u"详情页按钮仍为 %s，不选年份/数量，直接退回等待"
@@ -735,9 +862,7 @@ class FlowCore(object):
         # 2) 兜底：年份区域缺失但抢购按钮已渲染，
         #    仍尝试数量修改（数量状态有自己的兜底），再识别按钮
         button_region = self._button_region()
-        button_ready = self.bridge.find_regex_in_px_region(
-            SALE_TIME_REGEX, button_region
-        )
+        button_ready = bool(self._button_time_hits())
         for texts in (BUY_NOW_TEXTS, SOLD_OUT_TEXTS):
             for t in texts:
                 if self.bridge.text_exists_in_px_region(
@@ -767,11 +892,9 @@ class FlowCore(object):
     # ---------------- SELECT_QTY ----------------
     def _button_ready(self):
         """抢购按钮区是否已出现可识别内容（时间/立即抢购/售罄）"""
-        region = self._button_region()
-        if self.bridge.find_regex_in_px_region(
-            SALE_TIME_REGEX, region
-        ):
+        if self._button_time_hits():
             return True
+        region = self._button_region()
         for texts in (BUY_NOW_TEXTS, SOLD_OUT_TEXTS):
             for t in texts:
                 if self.bridge.text_exists_in_px_region(t, region):
@@ -859,27 +982,67 @@ class FlowCore(object):
 
     # ---------------- READ_DETAIL ----------------
     def _update_read_detail(self, dt, now):
-        """详情页：售罄结束；立即抢购点击；时间则安排或重侦"""
+        """
+        详情页按钮判定（按颜色 + 文字，不看上下位置）：
+        - 灰色按钮（已售罄 / xx:xx投放 / xx:xx备货中）→ 不点；
+        - 黄/橙色按钮（立即抢购）→ 点；
+        - 取不到颜色（旧 APK/低版本）→ 退回纯文字判断。
+        """
+        buy_visible = self._any_text(BUY_NOW_TEXTS)
+        color = self._button_color_state() if buy_visible else None
 
-        # 1) 立即抢购：1 秒内识别并点击，随后进入连点模式
-        hit = self._tap_buy()
-        if hit is not None:
-            self._log(u"识别到「%s」，立即点击购买" % hit)
-            self._soldout_pending = False
-            self._goto(
-                RAPID_BUY,
-                u"已点击购买，进入连点模式…",
+        # 1) 可点：按钮文字是立即抢购，且颜色不是灰
+        if buy_visible and color != u"gray":
+            hit = self._tap_buy()
+            if hit is None and color == u"buy":
+                center = self._button_center()
+                if center is not None:
+                    self._log(
+                        u"文字未识别但按钮为黄/橙色，按按钮中心兜底点击"
+                    )
+                    self.bridge.tap_px(
+                        center[0], center[1], TAP_JITTER_PX
+                    )
+                    hit = u"按钮中心"
+            if hit is not None:
+                self._gray_elapsed = 0.0
+                self._log(u"识别到「%s」，立即点击购买" % hit)
+                self._soldout_pending = False
+                self._goto(
+                    RAPID_BUY,
+                    u"已点击购买，进入连点模式…",
+                )
+                # 第一下已在 READ 点出，下一次点击前先等一个
+                # 独立随机的 0.[X][X] 秒
+                self._rapid_wait_left = rapid_click_delay()
+                # 本轮连点达到该随机次数后自动 back 重进刷新
+                self._rapid_reenter_limit = rapid_reenter_count()
+                self._log(
+                    u"本轮自动重进阈值：连点 %d 次后返回上一层重进"
+                    % self._rapid_reenter_limit
+                )
+                return
+
+        # 1b) 文字是立即抢购但按钮还是灰的（禁用态）：不点，等它变黄。
+        #     持续灰色超过阈值说明这次加载没刷新，退回列表重新进入。
+        if buy_visible and color == u"gray":
+            self._gray_elapsed += dt
+            if self._gray_elapsed >= BUTTON_GRAY_REENTER_SECONDS:
+                self._gray_elapsed = 0.0
+                self._log(
+                    u"按钮持续灰色 %.1f 秒仍未变黄，退回列表重新进入刷新"
+                    % BUTTON_GRAY_REENTER_SECONDS
+                )
+                self.bridge.back()
+                self._goto(WAIT_TIME, u"按钮未变黄，重新进入刷新…")
+                return
+            self._heartbeat_log(
+                dt, u"按钮为灰色（未开售/未刷新），等待变黄…"
             )
-            # 第一下已在 READ 点出，下一次点击前先等一个
-            # 独立随机的 0.[X][X] 秒
-            self._rapid_wait_left = rapid_click_delay()
-            # 本轮连点达到该随机次数后自动 back 重进刷新
-            self._rapid_reenter_limit = rapid_reenter_count()
-            self._log(
-                u"本轮自动重进阈值：连点 %d 次后返回上一层重进"
-                % self._rapid_reenter_limit
-            )
+            self.status = u"按钮灰色，等待变黄…"
             return
+
+        self._gray_elapsed = 0.0
 
         # 2) 已售罄：需二次确认——先返回列表重新进入，
         #    再次读到的按钮仍为售罄才结束（防 H5 缓存旧状态误判）
@@ -904,10 +1067,8 @@ class FlowCore(object):
             self._goto(ENTER_PRODUCT, u"售罄复核，重新进入确认…")
             return
 
-        # 3) 开售时间（按钮区域，档案 bounds 优先）
-        hits = self.bridge.find_regex_in_px_region(
-            SALE_TIME_REGEX, self._button_region()
-        )
+        # 3) 开售时间（整段精确匹配，排除按钮上方的说明文字）
+        hits = self._button_time_hits()
         if hits:
             hhmm = hits[0]
             # 动态稳定判断：不设固定等待，连续 N 次读数一致即采信；

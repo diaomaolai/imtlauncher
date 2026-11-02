@@ -36,6 +36,10 @@ class A11yBridge(object):
         self._any_supported = True
         # 服务端是否支持一次手势连点（旧 APK 没有，首次失败后退回）
         self._multi_supported = True
+        # 服务端是否支持整段正则匹配（旧 APK 没有，首次失败后退回）
+        self._exact_regex_supported = True
+        # 服务端是否支持区域取色（旧 APK/低版本没有，首次失败后退回）
+        self._color_supported = True
         if _ANDROID:
             self._init_native()
 
@@ -192,6 +196,29 @@ class A11yBridge(object):
         except Exception:
             return []
 
+    def find_exact_regex_texts(self, regex):
+        """
+        全页扫描"整段文本"匹配正则的控件（matcher.matches），返回捕获
+        分组（如 09:00），按控件底边由下往上排序。
+
+        按钮时间必须用这个方法：按钮文字是整段 "09:00投放"，而按钮
+        上方的说明文字「每日09:00、20:00投放」只是"包含"，整段匹配
+        不会命中说明文字。
+
+        返回 None 表示旧 APK 没有该方法（调用方退回区域扫描）；
+        返回 [] 表示有该方法但当前页面没有匹配。
+        """
+        service = self._service_or_none()
+        if service is None or not self._exact_regex_supported:
+            return None
+        try:
+            result = service.findExactRegexTexts(regex)
+            return [str(item) for item in result]
+        except Exception:
+            # 方法不存在（旧 APK）：本次起退回区域扫描
+            self._exact_regex_supported = False
+            return None
+
     # ---------------- 全量节点 dump（校准用） ----------------
     def dump_nodes(self):
         """
@@ -230,6 +257,28 @@ class A11yBridge(object):
             return bool(service.takeScreenshotToFile(path))
         except Exception:
             return False
+
+    def average_color_in_px_region(self, region_px):
+        """
+        取指定像素区域的平均颜色，返回 (r, g, b)；取不到返回 None。
+        用于按按钮填充色判断状态（灰=不可点 / 黄橙=立即抢购），
+        与按钮在说明文字上方还是下方无关。旧 APK 没有该方法时返回 None。
+        """
+        service = self._service_or_none()
+        if service is None or not self._color_supported:
+            return None
+        try:
+            min_x, min_y, max_x, max_y = region_px
+            rgb = service.averageColorInPxRegion(
+                int(min_x), int(min_y), int(max_x), int(max_y)
+            )
+            if rgb is None:
+                return None
+            return (int(rgb[0]), int(rgb[1]), int(rgb[2]))
+        except Exception:
+            # 方法不存在（旧 APK）或低版本：本次起不再尝试
+            self._color_supported = False
+            return None
 
     # ---------------- 手势点击 ----------------
     def tap_px(self, x, y, jitter_px=6):
