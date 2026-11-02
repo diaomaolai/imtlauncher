@@ -100,14 +100,17 @@ def build_home_dump():
 def build_igou_dump():
     return [
         _node(0, -1, (0, 0, 1080, 2400)),
+        _node(5, 0, (40, 1080, 170, 1160), text=u"全部"),
         _node(4, 0, (202, 966, 337, 1056), text=u"经典",
               clickable=True),
+        _node(6, 0, (390, 1080, 520, 1160), text=u"精品"),
     ]
 
 
 def build_list_dump():
     return [
         _node(0, -1, (0, 0, 1080, 2400)),
+        _node(6, 0, (40, 1080, 170, 1160), text=u"全部"),
         _node(4, 0, (202, 966, 337, 1056), text=u"经典"),
         _node(5, 0, (120, 1100, 960, 1400),
               text=u"飞天53%vol 500ml 带杯", clickable=True),
@@ -188,6 +191,8 @@ class MockBridgeFull(MockBridge):
             self.page = u"igou"
         elif text == u"经典":
             self.page = u"list"
+        elif u"飞天" in text:
+            self.page = u"detail"
         return True
 
 

@@ -17,12 +17,15 @@ import time
 
 from config import (
     PRODUCT_KEYWORDS,
+    PRODUCT_FULL_TEXTS,
     BUY_NOW_TEXTS,
     SOLD_OUT_TEXTS,
     SALE_TIME_REGEX,
     YEAR_CHOICES,
     IGOU_TAB_TEXT,
+    IGOU_CATEGORY_TEXTS,
     JINGDIAN_TAB_TEXT,
+    CALIBRATION_SPLASH_WAIT,
     CALIBRATION_STAGE_TIMEOUT,
     CALIBRATION_POLL_INTERVAL,
     CALIBRATION_MAX_CLICK_RETRIES,
@@ -135,9 +138,16 @@ class DeviceCalibrator(object):
 
     # ---------------- 动态等待 ----------------
 
-    def _wait_until(self, predicate, what):
-        """0.3 秒轮询直到 predicate 为真；超时返回 False"""
-        deadline = time.monotonic() + CALIBRATION_STAGE_TIMEOUT
+    def _wait_until(self, predicate, what, timeout=None):
+        """
+        动态轮询直到 predicate 为真；超时返回 False。
+        等待期间每 2 秒打一条探针日志（i购/经典/全部/数量 是否存在），
+        卡在开屏广告/协议页/加载中时能直接从日志看出是哪一种。
+        """
+        if timeout is None:
+            timeout = CALIBRATION_STAGE_TIMEOUT
+        deadline = time.monotonic() + timeout
+        last_probe = 0.0
         while time.monotonic() < deadline:
             if self._stopped():
                 return False
@@ -146,8 +156,17 @@ class DeviceCalibrator(object):
                     return True
             except Exception:
                 pass
+            now = time.monotonic()
+            if now - last_probe >= 2.0:
+                last_probe = now
+                self._log(u"等待%s… i购=%s 经典=%s 全部=%s 数量=%s"
+                          % (what,
+                             self.bridge.text_exists(IGOU_TAB_TEXT),
+                             self.bridge.text_exists(JINGDIAN_TAB_TEXT),
+                             self.bridge.text_exists(u"全部"),
+                             self.bridge.text_exists(u"数量")))
             self._wait(CALIBRATION_POLL_INTERVAL)
-        self._log(u"校准等待超时：%s" % what)
+        self._log(u"校准等待超时：%s（%.0f 秒）" % (what, timeout))
         return False
 
     def _click_until(self, click_fn, predicate, what):
@@ -172,21 +191,42 @@ class DeviceCalibrator(object):
     # ---------------- 页面判定（全机型通用，不依赖 px） ----------------
 
     def _is_detail(self):
-        return self.bridge.text_exists(u"数量") \
-            and self.bridge.text_exists(u"2026")
+        """详情页：有「数量」这一行即可（不强制年份是 2026）"""
+        return self.bridge.text_exists(u"数量")
 
     def _is_igou(self):
-        return self.bridge.text_exists(u"经典") \
+        """i购分类页：必须同时看到「经典」和「全部」两个分类标签"""
+        return self.bridge.text_exists(JINGDIAN_TAB_TEXT) \
+            and self.bridge.text_exists(u"全部") \
             and not self.bridge.text_exists(u"数量")
 
     def _is_home(self):
+        """首页：有底部「i购」tab，且不是 i购 分类页、不是详情页"""
         return self.bridge.text_exists(IGOU_TAB_TEXT) \
-            and not self.bridge.text_exists(u"经典") \
-            and not self.bridge.text_exists(u"数量")
+            and not self.bridge.text_exists(u"数量") \
+            and not self._is_igou()
+
+    def _product_center(self):
+        """按完整商品名取中心（兼容全角/半角括号），找不到再退回关键词"""
+        for name in PRODUCT_FULL_TEXTS:
+            center = self.bridge.node_center((name,))
+            if center is not None:
+                return center
+        return self.bridge.node_center(PRODUCT_KEYWORDS)
 
     def _is_list(self):
-        return self._is_igou() \
-            and self.bridge.node_center(PRODUCT_KEYWORDS) is not None
+        """经典列表页：i购分类页 + 能看到目标商品（完整名称优先）"""
+        return self._is_igou() and self._product_center() is not None
+
+    def _click_product(self):
+        """点目标商品：完整名称优先，失败再退回「飞天」+「%vol」"""
+        for name in PRODUCT_FULL_TEXTS:
+            try:
+                if self.bridge.click_text(name):
+                    return True
+            except Exception:
+                pass
+        return self.bridge.click_node_by_parts(PRODUCT_KEYWORDS)
 
     # ---------------- 截图与 dump ----------------
 
@@ -225,6 +265,15 @@ class DeviceCalibrator(object):
         return self._record(tree, target)
 
     def _product_record(self, tree):
+        """优先按完整商品名定位卡位；找不到再退回「飞天」+「%vol」"""
+        for name in PRODUCT_FULL_TEXTS:
+            node = tree.find_exact(name)
+            if node is None:
+                continue
+            target = tree.first_real_ancestor(node) if \
+                not tree.has_real_bounds(node) else node
+            if target is not None:
+                return self._record(tree, target)
         fallback = None
         for node in tree.nodes.values():
             text = u"%s %s" % (
@@ -241,6 +290,31 @@ class DeviceCalibrator(object):
             if target is not None:
                 return self._record(tree, target)
         return {}
+
+    def _category_records(self, tree):
+        """采集 i购 顶部分类标签（全部/经典/精品/生肖/陈年/文化/低度）"""
+        records = {}
+        for name in IGOU_CATEGORY_TEXTS:
+            record = self._tab_record(tree, name)
+            if record:
+                records[name] = record
+        return records
+
+    def _button_state_text(self, tree):
+        """当前按钮处于哪种状态：投放时间 / 立即抢购 / 已售罄"""
+        pattern = re.compile(SALE_TIME_REGEX)
+        for node in tree.nodes.values():
+            text = node.get(u"t") or u""
+            if not text or not tree.has_real_bounds(node):
+                continue
+            matched = pattern.search(text)
+            if matched:
+                return u"投放时间 %s" % matched.group()
+            if any(mark in text for mark in BUY_NOW_TEXTS):
+                return u"立即抢购"
+            if any(mark in text for mark in SOLD_OUT_TEXTS):
+                return u"已售罄"
+        return u"未识别"
 
     def _year_records(self, tree):
         records = {}
@@ -325,21 +399,31 @@ class DeviceCalibrator(object):
         self._log(u"首次武装，开始自动校准设备（不抢购）")
         launch_moutai(self.logger)
 
-        # 若起点已在详情页，先退回列表
-        if not self._wait_until(
-            lambda: self._is_home() or self._is_igou(),
-            u"i茅台首页/列表"
-        ):
-            return False, u"校准失败：无法进入 i茅台页面"
+        # 0) 等开屏广告结束：先按 10 秒等，没等到再按阶段超时继续等
+        ready = lambda: (
+            self._is_home() or self._is_igou() or self._is_detail()
+        )
+        self._log(u"等待开屏广告结束（约 %.0f 秒）…"
+                  % CALIBRATION_SPLASH_WAIT)
+        if not self._wait_until(ready, u"i茅台首屏",
+                                CALIBRATION_SPLASH_WAIT):
+            self._log(u"首屏仍未出现（可能在广告/协议/登录页），"
+                      u"继续等到 %.0f 秒…" % CALIBRATION_STAGE_TIMEOUT)
+            if not self._wait_until(ready, u"i茅台首屏"):
+                return False, (u"校准失败：未进入 i茅台页面"
+                               u"（开屏广告/隐私协议/未登录？）")
+
+        # 0b) 起点若在详情页，先退回列表（这次修掉了旧逻辑的死分支）
         if self._is_detail():
+            self._log(u"当前在详情页，先退回商品列表")
             self.bridge.back()
             if not self._wait_until(
                 lambda: self._is_home() or self._is_igou(),
-                u"退回列表"
+                u"退回商品列表"
             ):
                 return False, u"校准失败：详情页无法退回"
 
-        # 1) 首页：采集 i购 标签并点击
+        # 1) 首页：截图 → 识别 i购 → 点击
         if self._is_home():
             if not self._wait_until(self._is_home, u"首页渲染"):
                 return False, u"校准失败：首页未渲染完成"
@@ -356,39 +440,41 @@ class DeviceCalibrator(object):
             ):
                 return False, u"校准失败：点击 i购 后未进入 i购页"
         else:
-            self._log(u"当前已在 i购 内，跳过首页阶段")
+            self._log(u"当前已在 i购 分类页，跳过首页阶段")
 
-        # 2) i购页：采集 经典 标签并点击
-        if not self._wait_until(self._is_igou, u"i购页面渲染"):
+        # 2) i购页：截图 → 识别全部分类（全部/经典/精品/生肖/陈年/
+        #    文化/低度）→ 点击 经典
+        if not self._wait_until(self._is_igou, u"i购分类页渲染"):
             return False, u"校准失败：i购页未渲染完成"
         tree = self._dump_tree()
         self._capture(u"igou", u"02_igou.png")
-        self.controls[u"jingdian_tab"] = self._tab_record(
-            tree, JINGDIAN_TAB_TEXT
-        )
-        self._log(u"已采集 经典标签 bounds：%s"
-                  % self.controls[u"jingdian_tab"].get(u"bounds"))
+        categories = self._category_records(tree)
+        self.controls[u"category_tabs"] = categories
+        self.controls[u"jingdian_tab"] = categories.get(
+            JINGDIAN_TAB_TEXT
+        ) or self._tab_record(tree, JINGDIAN_TAB_TEXT)
+        self._log(u"已采集分类标签 %d 个：%s"
+                  % (len(categories), u"、".join(categories.keys())))
         if not self._click_until(
             lambda: self.bridge.click_text(JINGDIAN_TAB_TEXT),
             self._is_list, u"经典商品列表"
         ):
             return False, u"校准失败：点击 经典 后未进入列表"
 
-        # 3) 列表页：采集商品卡位并进入详情
+        # 3) 列表页：截图 → 识别目标商品 → 点击进详情
         if not self._wait_until(self._is_list, u"商品列表渲染"):
-            return False, u"校准失败：列表未出现飞天商品"
+            return False, u"校准失败：列表未出现目标商品"
         tree = self._dump_tree()
         self._capture(u"list", u"03_list.png")
         self.controls[u"product_card"] = self._product_record(tree)
         self._log(u"已采集商品卡位 bounds：%s"
                   % self.controls[u"product_card"].get(u"bounds"))
         if not self._click_until(
-            lambda: self.bridge.click_node_by_parts(PRODUCT_KEYWORDS),
-            self._is_detail, u"商品详情页"
+            self._click_product, self._is_detail, u"商品详情页"
         ):
             return False, u"校准失败：点击商品后未进入详情页"
 
-        # 4) 详情页：只采集，绝不点击抢购按钮
+        # 4) 详情页：截图 → 年份规格 → 数量/加减 → 按钮三种状态
         if not self._wait_until(self._is_detail, u"详情页渲染"):
             return False, u"校准失败：详情页未渲染完成"
         tree = self._dump_tree()
@@ -399,8 +485,15 @@ class DeviceCalibrator(object):
         self.controls[u"qty_minus"] = minus
         self.controls[u"qty_plus"] = plus
         self.controls[u"action_button"] = self._button_record(tree)
-        self._log(u"已采集年份格 %d 个、数量控件与按钮区，未点击任何购买按钮"
-                  % len(self.controls[u"year_cells"]))
+        self._log(
+            u"已采集年份格 %d 个、数量控件（数字/减/加=%s/%s/%s）、"
+            u"按钮状态=%s，未点击任何购买按钮"
+            % (len(self.controls[u"year_cells"]),
+               u"有" if value else u"无",
+               u"有" if minus else u"无",
+               u"有" if plus else u"无",
+               self._button_state_text(tree))
+        )
 
         # 5) 返回列表，结束校准
         self.bridge.back()
