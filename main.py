@@ -16,7 +16,7 @@ i茅台助手 - 主入口（Buildozer 要求入口文件名必须为 main.py）
 
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from kivy.app import App
 from kivy.clock import Clock
@@ -35,7 +35,7 @@ from flow_core import (
     WAIT_TIME,
     WAIT_VERIFY,
 )
-from scheduler import parse_target_time, format_remaining
+from scheduler import parse_target_time, format_remaining, next_slot
 from app_logger import AppLogger
 from app_ui import MainScreen
 from status_reporter import StatusStore
@@ -44,6 +44,7 @@ import card_client
 from slot_monitor import SlotMonitor
 from device_profile import ProfileStore, build_fingerprint
 from calibration import DeviceCalibrator
+import keep_alive
 
 
 class FlowWorker(threading.Thread):
@@ -72,6 +73,13 @@ class FlowWorker(threading.Thread):
             dt = current - last
             last = current
             now_dt = datetime.now()
+            # 主循环停顿检测：后台被 ROM 冻结时线程会停摆，
+            # 日志里出现几十秒空档（“到达拉起时刻”晚几十秒）。
+            if dt >= 1.0 and self.logger is not None:
+                self.logger.log(
+                    u"检测到流程停顿 %.1f 秒（state=%s），"
+                    u"可能是后台被系统冻结" % (dt, self.flow.state)
+                )
             try:
                 self.flow.update(dt, now_dt)
             except Exception as exc:
@@ -97,20 +105,32 @@ class FlowWorker(threading.Thread):
 
             # 节拍：
             # - RAPID 连点：0.01s（等待期间不扫描，到点才点一次）；
-            # - 选年份/改数量/整点等待/等人工验证：0.02s；
+            # - 选年份/改数量/详情页/等人工验证：0.02s；
             # - READ 识别按钮：0.05s，保证整点重进后第一时间点中；
-            # - 其余状态（导航/侦察）：0.3s 动态轮询。
+            # - WAIT 未到点：0.2s（到点前不做任何扫描，避免 50 Hz 空转）；
+            # - 其余状态（导航/侦察）：0.2s 动态轮询。
             if self.flow.state == RAPID_BUY:
                 self.stop_event.wait(0.01)
+            elif self.flow.state == WAIT_TIME:
+                target = self.flow.session_target
+                if target is not None and datetime.now() < \
+                        target - timedelta(seconds=1):
+                    self.stop_event.wait(0.2)
+                else:
+                    self.stop_event.wait(0.02)
             elif self.flow.state in (
-                SELECT_YEAR, SELECT_QTY, WAIT_TIME, WAIT_VERIFY,
-                WAIT_DETAIL,
+                SELECT_YEAR, SELECT_QTY, WAIT_VERIFY, WAIT_DETAIL,
             ):
                 self.stop_event.wait(0.02)
             elif self.flow.state == READ_DETAIL:
                 self.stop_event.wait(0.05)
             else:
                 self.stop_event.wait(TICK_INTERVAL)
+
+        # 流程真正结束（成功/售罄/异常）时停掉前台服务；
+        # 重校/取消路径由各自逻辑处理（重校会重新武装并再次启动）。
+        if self.flow.is_done:
+            keep_alive.stop(self.logger)
 
 
 class CalibrationWorker(threading.Thread):
@@ -152,6 +172,7 @@ class IMtAssistantApp(App):
         self.status_store = StatusStore()
         self.profile_store = ProfileStore(logger=self.app_logger)
         self.calibration_worker = None
+        self.calibration_stop = None
         self.card_store = CardStore()
         self.card_unlocked = False
 
@@ -216,12 +237,23 @@ class IMtAssistantApp(App):
             u"首次运行，设备校准中（不抢购）…"))
         self._ui(lambda: setattr(
             self.screen.schedule_btn, u"disabled", True))
+        # 正在校准时不重复启动第二个校准线程（否则两条导航链互相抢屏）
+        if self.calibration_worker is not None \
+                and self.calibration_worker.is_alive():
+            self.app_logger.log(u"设备校准已在进行中，忽略重复校准请求")
+            return
+        stop_event = threading.Event()
+        self.calibration_stop = stop_event
         calibrator = DeviceCalibrator(
-            self.bridge, self.profile_store, self.app_logger
+            self.bridge, self.profile_store, self.app_logger,
+            stop_event=stop_event,
         )
 
         def on_done(ok, result):
             # 本回调在 CalibrationWorker 工作线程执行
+            if stop_event.is_set():
+                self.app_logger.log(u"校准已取消，忽略本次结果")
+                return
             if ok:
                 self.flow.profile = result
                 self._ui(lambda: self.screen.set_status(
@@ -386,6 +418,8 @@ class IMtAssistantApp(App):
             recal_fn=self._on_runtime_recal_requested,
         )
         self.flow_worker.start()
+        # 前台保活：切到 i茅台 后本进程仍在后台运行，防止被 ROM 冻结
+        keep_alive.start(self.app_logger)
 
         self._ui(lambda: self.screen.set_schedule_button_armed(True))
         if immediate_launch:
@@ -476,12 +510,22 @@ class IMtAssistantApp(App):
         self._ui(lambda: self.screen.set_status(
             u"节点对不上，自动重新校准中…"))
         self.app_logger.log(u"运行时节点对不上，开始自动重新校准")
+        if self.calibration_worker is not None \
+                and self.calibration_worker.is_alive():
+            self.app_logger.log(u"已有校准在进行中，忽略重复重校请求")
+            return
+        stop_event = threading.Event()
+        self.calibration_stop = stop_event
         calibrator = DeviceCalibrator(
-            self.bridge, self.profile_store, self.app_logger
+            self.bridge, self.profile_store, self.app_logger,
+            stop_event=stop_event,
         )
 
         def on_done(ok, result):
             # 在 CalibrationWorker 工作线程执行
+            if stop_event.is_set():
+                self.app_logger.log(u"重校已取消，忽略本次结果")
+                return
             if not ok:
                 self._ui(lambda: self.screen.set_status(
                     u"重新校准失败：%s" % result))
@@ -489,7 +533,16 @@ class IMtAssistantApp(App):
                 return
             self.flow.profile = result
             self.app_logger.log(u"运行时重新校准完成，重新武装")
-            target = self.flow.first_target or datetime.now()
+            # 旧目标可能早已过去（例如 08:54 的流程在 09:09 才重校）；
+            # 用"下一个场次"重新武装，避免用过期目标空转。
+            target = self.flow.session_target or self.flow.first_target
+            now = datetime.now()
+            if target is None or target <= now:
+                target = next_slot(now)
+                self.app_logger.log(
+                    u"原目标已过，改为下一场次 %s 重新武装"
+                    % target.strftime(u"%H:%M:%S")
+                )
             self._arm_schedule(target)
 
         self.calibration_worker = CalibrationWorker(calibrator, on_done)
@@ -497,9 +550,13 @@ class IMtAssistantApp(App):
 
     def _disarm(self, status_text=None):
         """取消定时并恢复界面"""
+        if self.calibration_stop is not None:
+            self.calibration_stop.set()
+            self.calibration_stop = None
         if self.flow_worker is not None:
             self.flow_worker.stop()
             self.flow_worker = None
+        keep_alive.stop(self.app_logger)
         self.screen.set_schedule_button_armed(False)
         self.screen.set_countdown(u"倒计时：未设定")
         if status_text:

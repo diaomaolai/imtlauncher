@@ -409,6 +409,8 @@ class DeviceCalibrator(object):
         text = (node.get(u"t") or u"").strip()
         matched = re.search(r"\d{1,2}:\d{2}", text)
         if matched:
+            if u"补货中" in text:
+                return u"补货中 %s" % matched.group()
             return u"投放时间 %s" % matched.group()
         if any(mark in text for mark in BUY_NOW_TEXTS):
             return u"立即抢购"
@@ -512,6 +514,19 @@ class DeviceCalibrator(object):
         self._capture(u"detail", u"04_detail.png")
         self.controls[u"year_cells"] = self._year_records(tree)
         value, minus, plus = self._qty_records(tree)
+        # 数量行通常比年份格晚渲染：等它出现再采集（最多 10 秒），
+        # 否则档案里数量控件为空，后续无法改 6 瓶
+        for _ in range(10):
+            if value is not None or self._stopped():
+                break
+            self._wait(1.0)
+            tree = self._dump_tree()
+            value, minus, plus = self._qty_records(tree)
+        if value is None:
+            self._log(u"详情页数量行 10 秒内未出现，数量控件留空")
+        # 数量标签「数量」单独成区：后续判定"是否在详情页"直接读这一格，
+        # 不用全页找「数量」两个大字
+        self.controls[u"qty_label"] = self._tab_record(tree, u"数量")
         self.controls[u"qty_value"] = value
         self.controls[u"qty_minus"] = minus
         self.controls[u"qty_plus"] = plus

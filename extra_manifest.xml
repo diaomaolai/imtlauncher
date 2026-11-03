@@ -6,6 +6,15 @@
   由 CI 构建时补丁进 p4a 模板的 <application> 中。
 -->
 
+<!-- 前台保活服务所需权限（KeepAliveService）：
+     FOREGROUND_SERVICE + WAKE_LOCK 保持后台可调度；
+     POST_NOTIFICATIONS 用于 Android 13+ 的通知栏提示（拒绝也能运行）；
+     FOREGROUND_SERVICE_SPECIAL_USE 为 Android 14+ specialUse 类型所需。 -->
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+<uses-permission android:name="android.permission.WAKE_LOCK" />
+
 <!-- Android 11+（API 30+）包可见性声明：
      不声明的话 getLaunchIntentForPackage("com.moutai.mall") 返回 null -->
 <queries>

@@ -76,3 +76,27 @@ def format_remaining(seconds):
     minutes, secs = divmod(remainder, 60)
     return u"%02d:%02d:%02d" % (hours, minutes, secs)
 
+
+def next_slot(now=None):
+    """
+    返回下一个场次整点（今天剩余场次优先，否则明天第一场）。
+
+    用于运行期重校后重新武装：旧目标可能早已过去，不能再用它。
+    """
+    from config import MORNING_SLOTS, EVENING_SLOTS
+    now = now if now is not None else datetime.now()
+    slots = list(MORNING_SLOTS) + list(EVENING_SLOTS)
+    candidates = []
+    for text in slots:
+        hour_text, minute_text = text.split(u":")
+        candidate = now.replace(
+            hour=int(hour_text), minute=int(minute_text),
+            second=0, microsecond=0,
+        )
+        if candidate > now:
+            candidates.append(candidate)
+        else:
+            candidates.append(candidate + timedelta(days=1))
+    return min(candidates) if candidates else now + timedelta(minutes=5)
+
+

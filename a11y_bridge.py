@@ -71,6 +71,20 @@ class A11yBridge(object):
         except Exception:
             return None
 
+    def current_package(self):
+        """
+        当前前台窗口的包名；判断是否还在 i茅台。
+        手机桌面/其他 APP 会返回各自包名（如 com.huawei.android.launcher）。
+        旧 APK 没有该方法时返回 None（调用方退回纯文字判断）。
+        """
+        service = self._service_or_none()
+        if service is None:
+            return None
+        try:
+            return str(service.currentPackageName())
+        except Exception:
+            return None
+
     # ---------------- 节点查找 ----------------
     def node_center(self, keywords):
         """

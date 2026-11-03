@@ -104,6 +104,34 @@ class ButtonTimeTest(unittest.TestCase):
         )
         self.assertEqual(bridge.backs, 1)
 
+    def test_restock_prefix_is_matched(self):
+        """实拍格式「补货中 ~ 09:25投放」：整段匹配要能取到 09:25"""
+        bridge = FakeBridge()
+        bridge.button = u"补货中 ~ 09:25投放"
+        flow = FlowCore(bridge)
+        self.assertEqual(flow._button_time_hits(), [u"09:25"])
+
+    def test_restock_waits_for_target(self):
+        """读到补货时间 09:25 后按未来时间等待"""
+        bridge = FakeBridge()
+        bridge.button = u"补货中 ~ 09:25投放"
+        flow = FlowCore(bridge)
+        flow.reset(datetime(2026, 11, 3, 9, 25, 0))
+        now = datetime(2026, 11, 3, 9, 20, 0)
+        self.assertTrue(flow._handle_sale_time(u"09:25", now))
+        self.assertEqual(
+            flow.session_target, datetime(2026, 11, 3, 9, 25, 0)
+        )
+
+    def test_explanation_still_rejected(self):
+        """补上前缀后，说明文字「每日09:00、20:00投放」仍不被整段命中"""
+        pattern = re.compile(BUTTON_TIME_EXACT_REGEX)
+        self.assertIsNone(pattern.fullmatch(u"每日09:00、20:00投放"))
+        self.assertEqual(pattern.fullmatch(u"09:00投放").group(1), u"09:00")
+        self.assertEqual(
+            pattern.fullmatch(u"补货中 ~ 09:25投放").group(1), u"09:25"
+        )
+
     def test_calibration_records_button_not_explanation(self):
         """校准采集按钮 bounds 时不能把说明段落当成按钮"""
         nodes = [

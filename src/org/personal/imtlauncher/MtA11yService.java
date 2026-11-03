@@ -895,6 +895,44 @@ public class MtA11yService extends AccessibilityService {
         return result[0];
     }
 
+    /**
+     * 当前前台窗口的包名（取应用窗口 root 的 packageName）。
+     *
+     * 用途：判断"是否还在 i茅台"。手机桌面（华为桌面/ColorOS 桌面）、
+     * 微信等其它 APP 都会返回各自包名；流程据此把 i茅台 拉回前台，
+     * 而不是在桌面图标节点里误找 i购/经典。取不到时返回空串。
+     */
+    public String currentPackageName() {
+        try {
+            AccessibilityNodeInfo root = getRootInActiveWindow();
+            if (root != null) {
+                CharSequence name = root.getPackageName();
+                String value = name == null ? "" : name.toString();
+                recycle(root);
+                return value;
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            for (AccessibilityWindowInfo window : getWindows()) {
+                if (window.getType()
+                        != AccessibilityWindowInfo.TYPE_APPLICATION) {
+                    continue;
+                }
+                AccessibilityNodeInfo root = window.getRoot();
+                if (root == null) {
+                    continue;
+                }
+                CharSequence name = root.getPackageName();
+                String value = name == null ? "" : name.toString();
+                recycle(root);
+                return value;
+            }
+        } catch (Exception ignored) {
+        }
+        return "";
+    }
+
     private static String safeChar(CharSequence value) {
         return value == null ? "" : value.toString();
     }

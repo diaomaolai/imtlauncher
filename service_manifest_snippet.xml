@@ -20,3 +20,18 @@
         android:name="android.accessibilityservice"
         android:resource="@xml/imt_a11y_config" />
 </service>
+
+<!--
+  前台保活服务：定时抢购期间防止进程被 ROM 冻结
+  （ColorOS/EMUI 后台冻结会让 FlowWorker 停摆）。
+  specialUse 类型仅 Android 14+ 使用，低版本忽略该属性；
+  对应权限声明在 extra_manifest.xml。
+-->
+<service
+    android:name="org.personal.imtlauncher.KeepAliveService"
+    android:exported="false"
+    android:foregroundServiceType="specialUse">
+    <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="timed_purchase_automation" />
+</service>

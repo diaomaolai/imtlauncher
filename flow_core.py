@@ -27,7 +27,7 @@
    继续补点；数量控件缺失但按钮已渲染时放行（防改版卡死）；
 3. 详情页（动态识别，无固定等待）：
    - 立即抢购/立即购买：识别到立刻点，随后进入连点模式：
-     点一次 → 独立随机等 0.[X][X] 秒 → 再点一次 → 再随机等 …；
+     点一次 → 独立随机等 0.00~0.99 秒 → 再点一次 → 再随机等 …；
    - 开售时间（按钮"HH:MM投放"，右下角区域）：连续 2 次读数一致
      才采信；未来时间返回列表等整点（不加秒）；若读到本场时间
      但已过且仍在宽限内，说明重新加载没刷新到按钮，退出重进；
@@ -66,6 +66,8 @@ from config import (
     rapid_click_delay,
     rapid_reenter_count,
     ENTRY_CONTROL_GRACE_SECONDS,
+    ENTRY_CONTROL_GRACE_TICKS,
+    VERIFY_TIMEOUT_SECONDS,
     RAPID_REENTER_MAX_ROUNDS,
     SOLD_OUT_TEXTS,
     SALE_TIME_REGEX,
@@ -84,6 +86,7 @@ from config import (
     DETAIL_ENTER_TIMEOUT,
     DETAIL_ENTER_POLL,
     STABLE_READ_COUNT,
+    STUCK_RECOVER_SECONDS,
     WAIT_HEARTBEAT,
     TAP_JITTER_PX,
     IGOU_TAB_TEXT,
@@ -101,6 +104,8 @@ from config import (
     MANUAL_LAUNCH_LEAD_SECONDS,
 )
 
+from android_launcher import MOUTAI_PACKAGE
+
 # 状态
 IDLE = u"IDLE"                # 等待首次倒计时
 NAVIGATE_IGOU = u"NAV"        # 启动后导航：点 i购 → 点经典
@@ -109,7 +114,7 @@ WAIT_DETAIL = u"DETAIL"       # 已点商品，等详情页渲染（「数量」
 SELECT_YEAR = u"YEAR"         # 详情页先识别并点击年份（规格）
 SELECT_QTY = u"QTY"           # 再把数量改为目标瓶数（6）
 READ_DETAIL = u"READ"         # 数量确认后识别抢购按钮
-RAPID_BUY = u"RAPID"          # 立即抢购后按 0.xx 秒间隔连点
+RAPID_BUY = u"RAPID"          # 立即抢购后按 0.00~0.99 秒间隔连点
 WAIT_VERIFY = u"VERIFY"       # 安全组件验证弹窗：只等待，不点击
 WAIT_TIME = u"WAIT"           # 列表等待开售整点
 DONE = u"DONE"                # 结束（售罄）或中止（异常）
@@ -180,6 +185,16 @@ class FlowCore(object):
         self._color_state_last = None
         # 灰色按钮已持续秒数（超过阈值退回列表重新进入）
         self._gray_elapsed = 0.0
+        # 验证弹窗累计等待（超时后退回列表重新进入）
+        self._verify_total = 0.0
+        # YEAR/QTY 宽限按实际执行拍数累计（冻结跳时不会一次吃光）
+        self._entry_ticks = 0
+        # 前台包名缓存（判断"是否还在 i茅台"）与上次拉起时刻
+        self._pkg_cache = None
+        self._pkg_cache_at = 0.0
+        self._last_launch_at = None
+        # 当前状态已持续秒数（3 秒无进展触发本地恢复）
+        self._state_elapsed = 0.0
 
     # ---------------- 日志 ----------------
     def _log(self, message):
@@ -347,6 +362,60 @@ class FlowCore(object):
             self.needs_recalibration = True
             self._log(u"节点持续对不上，请求自动重新校准")
 
+    def _stuck_recover(self, next_state, do_back=True):
+        """
+        当前状态 3 秒没有推进 → 本地恢复（不等 60 秒重校）。
+        默认 back 回列表再重进；next_state 由调用方指定。
+        """
+        if self._state_elapsed < STUCK_RECOVER_SECONDS:
+            return False
+        self._log(
+            u"%.1f 秒没有进展（state=%s），执行本地恢复"
+            % (self._state_elapsed, self.state)
+        )
+        if do_back:
+            self.bridge.back()
+        self._goto(next_state, u"超时无进展，重新进入…")
+        return True
+
+    # ---------------- 前台应用判定（桌面/其他 APP 恢复） ----------------
+    def _foreground_package(self):
+        """前台包名（缓存 0.5 秒，避免每拍都调 JNI）"""
+        now = time.monotonic()
+        if self._pkg_cache_at and now - self._pkg_cache_at < 0.5:
+            return self._pkg_cache
+        getter = getattr(self.bridge, "current_package", None)
+        if not callable(getter):
+            return None
+        try:
+            package = getter()
+        except Exception:
+            package = None
+        self._pkg_cache = package
+        self._pkg_cache_at = now
+        return package
+
+    def _ensure_moutai(self, now):
+        """
+        当前在手机桌面（如误触 Home）或其它 APP 时，把 i茅台 拉回前台。
+
+        比在桌面图标节点里误找 i购/经典 可靠；1.5 秒内只拉一次，
+        避免冷启动期间反复 startActivity。取不到包名（旧 APK）返回
+        False，交回原文字判断。
+        """
+        package = self._foreground_package()
+        if not package or package == MOUTAI_PACKAGE:
+            return False
+        last = self._last_launch_at
+        if last is not None and (now - last).total_seconds() < 1.5:
+            return False
+        self._last_launch_at = now
+        self._log(u"当前不在 i茅台（前台 %s），拉起 i茅台" % package)
+        if callable(self.on_launch_app):
+            self.on_launch_app()
+        self.status = u"等待 i茅台 回到前台…"
+        return True
+
     # ---------------- 生命周期 ----------------
     def reset(self, first_target, launch_target=None):
         """武装流程。
@@ -396,6 +465,12 @@ class FlowCore(object):
         self._color_cache_at = 0.0
         self._color_state_last = None
         self._gray_elapsed = 0.0
+        self._verify_total = 0.0
+        self._entry_ticks = 0
+        self._pkg_cache = None
+        self._pkg_cache_at = 0.0
+        self._last_launch_at = None
+        self._state_elapsed = 0.0
         self._log(
             u"已设置定时，开售时刻 %s，计划拉起时刻 %s"
             % (
@@ -421,6 +496,17 @@ class FlowCore(object):
 
     # ---------------- 主循环 ----------------
     def update(self, dt, now):
+        self._state_elapsed += dt
+        # 手机桌面/其他 APP（如误触 Home、切到微信）→ 先把 i茅台 拉回前台。
+        # 用前台包名判断，比在桌面图标里找 i购/经典 可靠；
+        # IDLE 未到点、VERIFY 人工处理时不打扰用户。
+        if self.state in (
+            NAVIGATE_IGOU, ENTER_PRODUCT, WAIT_DETAIL,
+            SELECT_YEAR, SELECT_QTY, READ_DETAIL, RAPID_BUY,
+        ) or (self.state == WAIT_TIME and now >= self.session_target):
+            if self._ensure_moutai(now):
+                return
+
         if self.state == IDLE:
             self._update_idle(now)
         elif self.state == NAVIGATE_IGOU:
@@ -446,6 +532,7 @@ class FlowCore(object):
         """切换状态并重置计时器"""
         self.state = state
         self.status = status
+        self._state_elapsed = 0.0
         self._heartbeat = 0.0
         self._last_time_hit = None
         self._stable_count = 0
@@ -459,8 +546,11 @@ class FlowCore(object):
         self._stall_seconds = 0.0
         # 年份、数量各自独立计时 3 秒宽限：年份加载慢不能把数量的
         # 宽限一起吃掉，否则会跳过"改 6 瓶"。
-        if state in (SELECT_YEAR, SELECT_QTY):
+        if state in (SELECT_YEAR, SELECT_QTY, READ_DETAIL):
             self._entry_wait = 0.0
+            self._entry_ticks = 0
+        if state == WAIT_VERIFY:
+            self._verify_total = 0.0
         # 整点快速入页/等详情页：进入新状态时重新计时
         self._slot_fast_done = False
         self._detail_enter_elapsed = 0.0
@@ -679,23 +769,73 @@ class FlowCore(object):
         )
         return True
 
+    def _text_in_profile_region(self, control_key, text):
+        """
+        档案里有该控件的独立识别区时，优先在该区域内找文字（读取即可）；
+        没有档案/字段缺失返回 None，调用方退回全页判断。
+        """
+        region = self._profile_bounds(control_key)
+        if not region:
+            return None
+        try:
+            return self.bridge.text_exists_in_px_region(text, region)
+        except Exception:
+            return None
+
+    def _detail_visible(self):
+        """详情页判定：优先读档案的「数量」标签区，其次全页找「数量」"""
+        if self._text_in_profile_region(u"qty_label", u"数量"):
+            return True
+        return self.bridge.text_exists(u"数量")
+
     def _current_page(self):
         """
         任意页面接入：靠通用文字特征判定当前停在 i茅台 的哪个页面，
         全机型通用、不依赖 px。返回 detail/list/igou/home/unknown。
+        有档案时优先在各自独立识别区内判断（读取档案参数），
+        无档案/字段缺失才全页找。
         列表页必须认到完整商品名：只认「飞天」+「%vol」会把 i购
         「全部」视图里的「鼓乐飞天」也当成目标商品。
         """
-        if self.bridge.text_exists(u"数量"):
+        if self._detail_visible():
             return u"detail"
-        has_jd = self.bridge.text_exists(JINGDIAN_TAB_TEXT)
+        has_jd = self._text_in_profile_region(
+            u"jingdian_tab", JINGDIAN_TAB_TEXT
+        )
+        if has_jd is None:
+            has_jd = self.bridge.text_exists(JINGDIAN_TAB_TEXT)
         if has_jd and self._product_center() is not None:
             return u"list"
         if has_jd:
             return u"igou"
-        if self.bridge.text_exists(IGOU_TAB_TEXT):
+        on_igou_tab = self._text_in_profile_region(
+            u"igou_tab", IGOU_TAB_TEXT
+        )
+        if on_igou_tab is None:
+            on_igou_tab = self.bridge.text_exists(IGOU_TAB_TEXT)
+        if on_igou_tab:
             return u"home"
         return u"unknown"
+
+    def _recover_if_left_detail(self):
+        """
+        误触离开详情页（首页/π社区/小茅运/我的 任意 tab，或 i购页）时，
+        立刻回 NAV 按 点 i购 → 点经典 → 点商品 的顺序重新进入。
+        返回 True 表示已切换状态。
+        """
+        page = self._current_page()
+        if page in (u"home", u"igou"):
+            self._log(
+                u"已离开详情页（当前在 %s），重新点击 i购/经典 进入"
+                % page
+            )
+            self._goto(NAVIGATE_IGOU, u"误触离开详情，重新导航…")
+            return True
+        if page == u"list":
+            self._log(u"已回到商品列表（可能是误触返回），重新点击商品")
+            self._goto(ENTER_PRODUCT, u"回到列表，重新点击商品…")
+            return True
+        return False
 
     # ---------------- IDLE ----------------
     def _update_idle(self, now):
@@ -778,7 +918,13 @@ class FlowCore(object):
             self.status = u"已点击 i购，等待页面加载…"
             return
 
-        # unknown：冷启动/加载中，动态等待可识别页面出现
+        # unknown：冷启动/加载中，动态等待可识别页面出现；
+        # 3 秒还认不出（广告页/登录页/卡住）→ 限频拉起 i茅台 重试
+        if self._state_elapsed >= STUCK_RECOVER_SECONDS:
+            self._state_elapsed = 0.0
+            self._log(u"3 秒未识别到页面，拉起 i茅台 重试")
+            if callable(self.on_launch_app):
+                self.on_launch_app()
         self._heartbeat_log(
             dt, u"等待 i茅台加载可识别页面（首页/i购/列表/详情）…"
         )
@@ -788,12 +934,16 @@ class FlowCore(object):
 
     # ---------------- ENTER_PRODUCT ----------------
     def _update_enter_product(self, dt, now):
-        """列表查找商品：商品节点+列表标签双确认才进入（弹窗期无限等待）"""
+        """列表查找商品：商品节点+列表标签双确认才进入（弹窗期有限等待）"""
         if not self.bridge.is_connected():
             self._finish(
                 False,
                 u"无障碍服务未开启，请先到设置中开启后重新定时",
             )
+            return
+
+        # 3 秒还点不进商品（列表未确认/点击失败）→ 回 NAV 重新识别
+        if self._stuck_recover(NAVIGATE_IGOU, do_back=False):
             return
 
         center = self._list_ready()
@@ -870,18 +1020,24 @@ class FlowCore(object):
                 ):
                     button_ready = True
                     break
-        # 2) 兜底：按钮已渲染且等待超过宽限（页面确实改版），
+        # 2) 兜底：按钮已渲染且实际执行满宽限拍数（页面确实改版），
         #    才放行；宽限内即使按钮先出现也坚持等年份，防止跳过
-        if button_ready and self._entry_wait >= ENTRY_CONTROL_GRACE_SECONDS:
+        if button_ready and self._entry_ticks >= ENTRY_CONTROL_GRACE_TICKS:
             self._log(
-                u"等待 %.1f 秒仍无年份规格区域，按钮已出现，"
-                u"跳过年份尝试数量修改" % self._entry_wait
+                u"等待 %d 拍（约 %.1f 秒）仍无年份规格区域，按钮已出现，"
+                u"跳过年份尝试数量修改"
+                % (self._entry_ticks, self._entry_wait)
             )
             self._goto(SELECT_QTY, u"跳过年份，修改数量…")
             return
 
         # 3) 详情页加载中（含按钮先渲染但宽限未到）：动态等待
         self._entry_wait += dt
+        self._entry_ticks += 1
+        if self._entry_ticks % 50 == 0 and self._recover_if_left_detail():
+            return
+        if self._stuck_recover(ENTER_PRODUCT):
+            return
         self._heartbeat_log(
             dt,
             u"等待详情页年份规格区域渲染（年份「%s」）…" % year,
@@ -963,17 +1119,23 @@ class FlowCore(object):
             self.status = u"修改数量 %d→%d…" % (value, QTY_TARGET)
             return
 
-        # 读不到数量：按钮已渲染且等待超过宽限（页面改版）才放行；
-        # 宽限内坚持等数量控件，保证正常加载时一定改 6 瓶
+        # 读不到数量：按钮已渲染且实际执行满宽限拍数（页面改版）才放行；
+        # 宽限内坚持等数量控件，保证正常加载时一定改 6 瓶。
+        # 用拍数而不是墙钟：后台被冻结时墙钟会跳几十秒，不能因此跳过改数量。
         if self._button_ready() \
-                and self._entry_wait >= ENTRY_CONTROL_GRACE_SECONDS:
+                and self._entry_ticks >= ENTRY_CONTROL_GRACE_TICKS:
             self._log(
-                u"等待 %.1f 秒仍无数量控件，按钮已出现，直接识别按钮"
-                % self._entry_wait
+                u"等待 %d 拍（约 %.1f 秒）仍无数量控件，按钮已出现，"
+                u"直接识别按钮" % (self._entry_ticks, self._entry_wait)
             )
             self._goto(READ_DETAIL, u"跳过数量，识别抢购按钮…")
             return
         self._entry_wait += dt
+        self._entry_ticks += 1
+        if self._entry_ticks % 50 == 0 and self._recover_if_left_detail():
+            return
+        if self._stuck_recover(ENTER_PRODUCT):
+            return
         self._heartbeat_log(
             dt, u"等待详情页数量区域渲染…"
         )
@@ -1013,7 +1175,7 @@ class FlowCore(object):
                     u"已点击购买，进入连点模式…",
                 )
                 # 第一下已在 READ 点出，下一次点击前先等一个
-                # 独立随机的 0.[X][X] 秒
+                # 独立随机的 0.00~0.99 秒
                 self._rapid_wait_left = rapid_click_delay()
                 # 本轮连点达到该随机次数后自动 back 重进刷新
                 self._rapid_reenter_limit = rapid_reenter_count()
@@ -1088,6 +1250,13 @@ class FlowCore(object):
 
         # 4) 按钮尚未刷新/弹窗遮挡：不中止、不返回，无限等待，
         #    每 5 秒记心跳；按钮一出现立即处理（识别在 1 秒内）。
+        #    但若用户误触离开了详情页（首页/社区/小茅运/我的 任意 tab），
+        #    立即回 NAV 点 i购 → 经典 → 商品，而不是在别的页面空等。
+        self._entry_ticks += 1
+        if self._entry_ticks % 20 == 0 and self._recover_if_left_detail():
+            return
+        if self._stuck_recover(ENTER_PRODUCT):
+            return
         self._heartbeat_log(
             dt,
             u"详情页等待按钮刷新/弹窗消失（不做任何点击）…",
@@ -1098,7 +1267,7 @@ class FlowCore(object):
     # ---------------- RAPID_BUY ----------------
     def _update_rapid_buy(self, dt, now):
         """
-        抢购连点（严格 0.[X][X] 秒间隔，无轮次、无连击）：
+        抢购连点（严格 0.00~0.99 秒间隔，无轮次、无连击）：
         - 每点一次「立即抢购/立即购买」，就重新随机 0.00~0.99 秒
           （两位数字各自 0-9）再点下一次；
         - 等待期间只做倒计时，不做任何节点扫描，保证间隔不被 JNI
@@ -1149,7 +1318,7 @@ class FlowCore(object):
             self._rapid_click_count += 1
             if self._rapid_click_count == 1:
                 self._log(
-                    u"连点模式：每点一次后随机等 0.[X][X] 秒"
+                    u"连点模式：每点一次后随机等 0.00~0.99 秒"
                     u"（X 各自 0-9）再点下一次，点击「%s」" % hit
                 )
             elif self._rapid_click_count % 20 == 0:
@@ -1183,7 +1352,7 @@ class FlowCore(object):
                 self._soft_hint_logged = now
                 self._log(
                     u"出现「人数过多」类提示（第 %d 次），"
-                    u"继续按 0.[X][X] 秒间隔点击" % self._soft_hint_count
+                    u"继续按 0.00~0.99 秒间隔点击" % self._soft_hint_count
                 )
 
         # 7) 没点中：连续多次说明页面已变，回详情重新识别
@@ -1265,10 +1434,23 @@ class FlowCore(object):
             return
 
         self._verify_elapsed += dt
+        self._verify_total += dt
         if self._verify_elapsed < VERIFY_POLL_INTERVAL:
             self.status = u"等待人工完成安全验证…"
             return
         self._verify_elapsed = 0.0
+
+        # 弹窗长时间无人处理：不能永远停在这里（会挡住后续场次），
+        # 超时后退回列表，按本场时间重新进入刷新。
+        if self._verify_total >= VERIFY_TIMEOUT_SECONDS:
+            self._log(
+                u"安全验证弹窗持续 %.0f 秒未处理，退回列表重新进入"
+                % self._verify_total
+            )
+            self._verify_total = 0.0
+            self.bridge.back()
+            self._goto(WAIT_TIME, u"验证超时，重新进入刷新…")
+            return
 
         if self._order_page_visible():
             self._on_order_page()
@@ -1326,10 +1508,16 @@ class FlowCore(object):
             self._detail_backs = 0
 
         if page == u"unknown":
-            self._log(u"开售整点到达但不在 i茅台，自行启动并等待接入")
-            if callable(self.on_launch_app):
-                self.on_launch_app()
-            self.status = u"整点已到，拉起 i茅台…"
+            # 认不出页面（登录页/开屏广告/加载中）：限频拉起，避免
+            # 每个拍都 startActivity；长时间认不出由停滞计数触发重校。
+            last = self._last_launch_at
+            if last is None or (now - last).total_seconds() >= 1.5:
+                self._last_launch_at = now
+                self._log(u"开售整点到达但页面不可识别，拉起 i茅台 并等待接入")
+                if callable(self.on_launch_app):
+                    self.on_launch_app()
+            self.status = u"整点已到，等待 i茅台 页面…"
+            self._tick_stall(dt)
             return
 
         if page == u"detail":
@@ -1353,6 +1541,7 @@ class FlowCore(object):
             if center is None:
                 # 列表未确认，下轮重试，不盲目点击
                 self.status = u"整点列表确认中…"
+                self._tick_stall(dt)
                 return
             self.recorded_pos = center
             # 目标商品优先（档案卡位+全称），失败再按坐标兜底

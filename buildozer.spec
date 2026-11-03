@@ -14,7 +14,7 @@ source.exclude_dirs = bin,buildozer,.buildozer,.github,.git,__pycache__,apk_down
 source.exclude_patterns = apk_download_*,test_*.py,diag_*.py,sim_*.py,reproduce_*.py,verify_*.py,UI*.png,*.txt,*.md
 
 # 版本号
-version = 1.3.8
+version = 1.3.9
 
 # 依赖：python3 + kivy 界面 + pyjnius 调安卓原生 API
 # certifi：内置 CA 根证书库（修复 Android 上 HTTPS 证书校验失败）
