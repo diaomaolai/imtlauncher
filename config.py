@@ -11,7 +11,7 @@ import time
 
 # ---------------- 基础信息 ----------------
 APP_TITLE = u"i茅台助手"
-APP_VERSION = "1.3.9"
+APP_VERSION = "1.4.0"
 
 # 目标设备基准：OPPO PDSM00 1080x2400（下面所有绝对像素都按此实测）
 

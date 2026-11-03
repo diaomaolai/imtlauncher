@@ -159,6 +159,8 @@ class FlowCore(object):
         self._detail_backs = 0
         # 数量修改：本拍/累计加号点击
         self._qty_taps = 0
+        # 数字读不到时是否已盲点过一次加号
+        self._qty_blind_done = False
         # 本次要选择的年份（UI 下拉菜单武装时写入；默认当前年份）
         self.year_target = YEAR_TARGET_TEXT
         # 弹窗确认成功回调（由 main 注入，用于状态上报置 1）
@@ -304,7 +306,11 @@ class FlowCore(object):
         return (x1, y1, x2, y2)
 
     def _sample_button_rgb(self):
-        """按缓存取按钮填充色，返回 (r, g, b)；取不到返回 None"""
+        """
+        按缓存取按钮填充色，返回 (r, g, b)；取不到返回 None。
+        只在"按钮文字是立即购买"时调用；底层截图最多等 800ms，
+        超时返回 None，调用方按文字判断（宁可点，不要卡）。
+        """
         now = time.monotonic()
         if self._color_cache_at \
                 and now - self._color_cache_at < BUTTON_COLOR_CACHE_SECONDS:
@@ -454,6 +460,7 @@ class FlowCore(object):
         self._reenter_count = 0
         self._detail_backs = 0
         self._qty_taps = 0
+        self._qty_blind_done = False
         self._entry_wait = 0.0
         self._rapid_reenter_limit = 0
         self._rapid_reenter_rounds = 0
@@ -500,12 +507,15 @@ class FlowCore(object):
         # 手机桌面/其他 APP（如误触 Home、切到微信）→ 先把 i茅台 拉回前台。
         # 用前台包名判断，比在桌面图标里找 i购/经典 可靠；
         # IDLE 未到点、VERIFY 人工处理时不打扰用户。
+        # 注意：这里只"顺手拉起"，不 return——前台包名在部分 ROM 上
+        # 可能取到别的窗口（自己的进程/桌面），一旦误判就会把流程
+        # 卡在"反复拉起"里。拉完之后继续跑当前状态，页面节点能认
+        # 就正常走，认不出再靠 3 秒本地恢复。
         if self.state in (
             NAVIGATE_IGOU, ENTER_PRODUCT, WAIT_DETAIL,
             SELECT_YEAR, SELECT_QTY, READ_DETAIL, RAPID_BUY,
         ) or (self.state == WAIT_TIME and now >= self.session_target):
-            if self._ensure_moutai(now):
-                return
+            self._ensure_moutai(now)
 
         if self.state == IDLE:
             self._update_idle(now)
@@ -543,6 +553,8 @@ class FlowCore(object):
         self._rapid_misses = 0
         self._verify_elapsed = 0.0
         self._qty_taps = 0
+        if state == SELECT_QTY:
+            self._qty_blind_done = False
         self._stall_seconds = 0.0
         # 年份、数量各自独立计时 3 秒宽限：年份加载慢不能把数量的
         # 宽限一起吃掉，否则会跳过"改 6 瓶"。
@@ -711,6 +723,51 @@ class FlowCore(object):
         """是否出现「人数过多」这类并发 Toast（不停止点击，只统计）"""
         return self._any_text(SOFT_HINT_TEXTS)
 
+    def _back_to_list(self, rounds=3):
+        """
+        用系统 back 退回「经典列表」，并处理 back 退多了的情况：
+          detail → 系统 back；
+          home   → 点 i购，再点经典；
+          igou   → 点经典；
+          unknown（桌面/加载中）→ 拉起 i茅台 后再判。
+        每一轮都用 _current_page 重新判定，不假设退到了哪。
+        返回 True 表示当前确实在列表。
+        """
+        for _ in range(rounds):
+            page = self._current_page()
+            if page == u"list":
+                return True
+            if page == u"detail":
+                self.bridge.back()
+                time.sleep(0.15)
+                continue
+            if page == u"igou":
+                region = self._region(
+                    u"jingdian_tab", JINGDIAN_TAB_REGION_PX
+                )
+                if not self.bridge.click_text_in_px_region(
+                        JINGDIAN_TAB_TEXT, region):
+                    self.bridge.click_text(JINGDIAN_TAB_TEXT)
+                time.sleep(0.2)
+                continue
+            if page == u"home":
+                region = self._region(u"igou_tab", IGOU_TAB_REGION_PX)
+                if not self.bridge.click_text_in_px_region(
+                        IGOU_TAB_TEXT, region):
+                    self.bridge.click_text(IGOU_TAB_TEXT)
+                time.sleep(0.2)
+                continue
+            # unknown：桌面/其他 APP/加载中，拉起 i茅台 后再判
+            if callable(self.on_launch_app):
+                self.on_launch_app()
+            time.sleep(0.2)
+        page = self._current_page()
+        if page != u"list":
+            self._log(
+                u"未能回到列表（当前 %s），到点重进时再接入" % page
+            )
+        return page == u"list"
+
     def _handle_sale_time(self, hhmm, now):
         """
         读到按钮区开售时间后的统一处理（READ 和 YEAR 预检共用）：
@@ -737,7 +794,8 @@ class FlowCore(object):
                         u"退出重进第 %d 次"
                         % (hhmm, late, self._reenter_count)
                     )
-                self.bridge.back()
+                if not self._back_to_list():
+                    self._log(u"未能回到列表，仍按重进刷新处理")
                 # 目标仍是本场整点（已过），WAIT 下一拍立即重进
                 self.session_target = target
                 self.display_target = target
@@ -760,7 +818,8 @@ class FlowCore(object):
             self._log(
                 u"读取到开售时间 %s（未来），返回列表，等待整点" % hhmm
             )
-        self.bridge.back()
+        if not self._back_to_list():
+            self._log(u"未能回到列表，仍按等待处理（到点重进）")
         self.session_target = target
         self.display_target = target
         self._goto(
@@ -772,7 +831,9 @@ class FlowCore(object):
     def _text_in_profile_region(self, control_key, text):
         """
         档案里有该控件的独立识别区时，优先在该区域内找文字（读取即可）；
-        没有档案/字段缺失返回 None，调用方退回全页判断。
+        没有档案/字段缺失/区域没命中都返回 None 或 False，调用方
+        一律再全页确认一次——区域只做加速，绝不能因为档案旧了
+        就把明明在眼前的页面判成 unknown。
         """
         region = self._profile_bounds(control_key)
         if not region:
@@ -793,7 +854,7 @@ class FlowCore(object):
         任意页面接入：靠通用文字特征判定当前停在 i茅台 的哪个页面，
         全机型通用、不依赖 px。返回 detail/list/igou/home/unknown。
         有档案时优先在各自独立识别区内判断（读取档案参数），
-        无档案/字段缺失才全页找。
+        但区域未命中时一定退回全页文字确认（兜底）。
         列表页必须认到完整商品名：只认「飞天」+「%vol」会把 i购
         「全部」视图里的「鼓乐飞天」也当成目标商品。
         """
@@ -802,7 +863,7 @@ class FlowCore(object):
         has_jd = self._text_in_profile_region(
             u"jingdian_tab", JINGDIAN_TAB_TEXT
         )
-        if has_jd is None:
+        if not has_jd:
             has_jd = self.bridge.text_exists(JINGDIAN_TAB_TEXT)
         if has_jd and self._product_center() is not None:
             return u"list"
@@ -811,7 +872,7 @@ class FlowCore(object):
         on_igou_tab = self._text_in_profile_region(
             u"igou_tab", IGOU_TAB_TEXT
         )
-        if on_igou_tab is None:
+        if not on_igou_tab:
             on_igou_tab = self.bridge.text_exists(IGOU_TAB_TEXT)
         if on_igou_tab:
             return u"home"
@@ -902,7 +963,9 @@ class FlowCore(object):
             if not self.bridge.click_text_in_px_region(
                 JINGDIAN_TAB_TEXT, jd_region
             ):
-                self._log(u"「经典」点击失败，下轮重试")
+                # 兜底：区域没命中（档案旧/布局变），全页点一次
+                self._log(u"「经典」区域点击失败，改全页文字点击")
+                self.bridge.click_text(JINGDIAN_TAB_TEXT)
             self.status = u"已点击经典，等待商品列表…"
             return
 
@@ -914,7 +977,9 @@ class FlowCore(object):
             if not self.bridge.click_text_in_px_region(
                 IGOU_TAB_TEXT, igou_region
             ):
-                self._log(u"「i购」点击失败，下轮重试")
+                # 兜底：区域没命中（档案旧/布局变），全页点一次
+                self._log(u"「i购」区域点击失败，改全页文字点击")
+                self.bridge.click_text(IGOU_TAB_TEXT)
             self.status = u"已点击 i购，等待页面加载…"
             return
 
@@ -1079,6 +1144,15 @@ class FlowCore(object):
         hits = self.bridge.find_regex_in_px_region(
             QTY_REGEX, value_region
         )
+        # 兜底：档案数量区没读到数字时，用「数量」标签同一行的右侧带
+        # 再读一次（防止旧档案的 qty_value 区域偏了）
+        if not hits:
+            label = self._profile_bounds(u"qty_label")
+            if label and len(label) == 4:
+                band = (label[2], label[1] - 10, 100000, label[3] + 10)
+                hits = self.bridge.find_regex_in_px_region(
+                    QTY_REGEX, band
+                )
         value = None
         if hits:
             try:
@@ -1103,10 +1177,17 @@ class FlowCore(object):
                 self._goto(READ_DETAIL, u"数量修改异常，识别抢购按钮…")
                 return
             # 同一拍内连续点完需要的次数（加号节点无文字）：
-            # 档案加号中心优先，无档案退回 OPPO 固定中心。
+            # 档案加号中心优先；没有档案时按"数字框右侧"推算加号，
+            # 最后才退回 OPPO 固定中心（换机型时固定 px 不通用）。
             # 一次手势派发多点（新 APK），旧 APK 自动退回逐个点击。
-            plus_center = self._profile_center(u"qty_plus") \
-                or QTY_PLUS_CENTER_PX
+            plus_center = self._profile_center(u"qty_plus")
+            if plus_center is None:
+                box = self._profile_bounds(u"qty_value") \
+                    or QTY_VALUE_REGION_PX
+                plus_center = (
+                    int(box[2]) + 30,
+                    (int(box[1]) + int(box[3])) // 2,
+                )
             px, py = plus_center
             need = min(need, QTY_MAX_TAPS - self._qty_taps)
             done = self._tap_plus(px, py, need)
@@ -1117,6 +1198,19 @@ class FlowCore(object):
                 % (value, done, self._qty_taps, QTY_TARGET)
             )
             self.status = u"修改数量 %d→%d…" % (value, QTY_TARGET)
+            return
+
+        # 读不到数字但档案里采到了加号区域：盲点 4 次（默认 2→6）
+        # 后下一拍复核；只盲点一次，避免把数量加爆。
+        plus_center = self._profile_center(u"qty_plus")
+        if plus_center is not None and not self._qty_blind_done:
+            self._qty_blind_done = True
+            self._log(
+                u"数量数字读不到，按档案加号盲点 %d 次（默认 2→%d）"
+                % (QTY_TARGET - 2, QTY_TARGET)
+            )
+            self._tap_plus(plus_center[0], plus_center[1], QTY_TARGET - 2)
+            self.status = u"数量盲点后复核…"
             return
 
         # 读不到数量：按钮已渲染且实际执行满宽限拍数（页面改版）才放行；
@@ -1295,25 +1389,24 @@ class FlowCore(object):
                 )
                 return
 
-        # 2) 售罄优先（唯一正常退出，首次走复核）
-        sold_out = False
-        for text in SOLD_OUT_TEXTS:
-            if self.bridge.text_exists(text):
-                sold_out = True
-                break
-        if sold_out:
-            self._soldout_pending = True
-            self._log(
-                u"连点中识别到「已售罄」，停止连点，"
-                u"返回列表并重新进入复核"
-            )
-            self.bridge.back()
-            self._goto(ENTER_PRODUCT, u"售罄复核，重新进入确认…")
-            return
-
         # 3) 点一次（按钮区优先，失败退回全页节点点击）
         hit = self._tap_buy()
         clicked = hit is not None
+
+        # 3b) 售罄检查：点不中时必查（按钮文字消失）；点位正常时
+        #     每 5 次点击才查一次，省掉大部分全树遍历。
+        if not clicked or self._rapid_click_count % 5 == 0:
+            for text in SOLD_OUT_TEXTS:
+                if self.bridge.text_exists(text):
+                    self._soldout_pending = True
+                    self._log(
+                        u"识别到「已售罄」，停止连点，"
+                        u"返回列表并重新进入复核"
+                    )
+                    self.bridge.back()
+                    self._goto(ENTER_PRODUCT, u"售罄复核，重新进入确认…")
+                    return
+
         if clicked:
             self._rapid_click_count += 1
             if self._rapid_click_count == 1:

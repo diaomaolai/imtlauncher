@@ -93,6 +93,35 @@ class NodeTree(object):
                 return ancestor
         return None
 
+    def clickable_ancestor(self, node, max_area_ratio=0.35):
+        """
+        向上找可点击祖先（ck=true），用于把「i购/经典」这种文字节点
+        扩成整颗 tab 的矩形区域（截图里红框那种），方便区域内点击。
+        祖先区域超过屏幕 35% 视为整页容器，不采用。
+        """
+        root = None
+        for candidate in self.nodes.values():
+            if int(candidate.get(u"p", -1)) < 0:
+                root = candidate
+                break
+        screen_area = 1
+        if root is not None:
+            b = self.bounds(root)
+            screen_area = max(
+                1, (b[2] - b[0]) * (b[3] - b[1])
+            )
+        current = node
+        for _ in range(8):
+            if current is None:
+                return None
+            if current.get(u"ck") and self.has_real_bounds(current):
+                b = self.bounds(current)
+                area = (b[2] - b[0]) * (b[3] - b[1])
+                if area <= screen_area * max_area_ratio:
+                    return current
+            current = self.parent(current)
+        return None
+
     def find_exact(self, text):
         """文字或 contentDescription 精确匹配的第一个节点"""
         for node in self.nodes.values():
@@ -258,10 +287,12 @@ class DeviceCalibrator(object):
         }
 
     def _tab_record(self, tree, text):
+        """tab 区域：优先整颗可点击 tab（红框那种），否则文字节点本身"""
         node = tree.find_exact(text)
         if node is None:
             return {}
-        target = tree.first_real_ancestor(node)
+        target = tree.clickable_ancestor(node) \
+            or tree.first_real_ancestor(node)
         if target is None:
             return {}
         return self._record(tree, target)
@@ -272,8 +303,8 @@ class DeviceCalibrator(object):
             node = tree.find_exact(name)
             if node is None:
                 continue
-            target = tree.first_real_ancestor(node) if \
-                not tree.has_real_bounds(node) else node
+            target = tree.clickable_ancestor(node) \
+                or tree.first_real_ancestor(node)
             if target is not None:
                 return self._record(tree, target)
         fallback = None
@@ -314,9 +345,35 @@ class DeviceCalibrator(object):
         """返回 (数字框, 减号, 加号) 三个记录；取不到为空字典"""
         empty = {}, {}, {}
         label = tree.find_exact(u"数量")
-        if label is None:
+        if label is None or not tree.has_real_bounds(label):
             return empty
-        value = None
+        value = self._qty_value_node(tree, label)
+        if value is not None:
+            all_siblings = [
+                node for node in tree.siblings(value)
+                if node is not value and tree.has_real_bounds(node)
+            ]
+            # 加减号无文字（ImageView/Button），先排除带文字的数量标签；
+            # 找不到无文字按钮时再退回全部同级节点
+            siblings = [
+                node for node in all_siblings
+                if not (node.get(u"t") or node.get(u"d"))
+            ] or all_siblings
+            if siblings:
+                minus = min(siblings, key=lambda n: tree.bounds(n)[0])
+                plus = max(siblings, key=lambda n: tree.bounds(n)[0])
+                return (
+                    self._record(tree, value),
+                    self._record(tree, minus),
+                    self._record(tree, plus),
+                )
+            return self._record(tree, value), {}, {}
+        # 兜底：数字框不是 EditText / 层级不同时，用「数量」标签的
+        # 同一行带找数字和加减号（数字=最右的数字节点，加号=最右按钮）
+        return self._qty_records_by_band(tree, label)
+
+    def _qty_value_node(self, tree, label):
+        """数字框：先按 EditText 祖先链找，再按标签行带找纯数字节点"""
         for ancestor in tree.ancestors(label):
             window = int(ancestor.get(u"window", 0))
             for child in tree.children.get(
@@ -326,28 +383,50 @@ class DeviceCalibrator(object):
                 text = (child.get(u"t") or u"").strip()
                 if u"EditText" in class_name \
                         and re.fullmatch(r"\d+", text):
-                    value = child
-                    break
-            if value is not None:
-                break
-        if value is None:
-            return empty
-        all_siblings = [
-            node for node in tree.siblings(value)
-            if node is not value and tree.has_real_bounds(node)
-        ]
-        # 加减号无文字（ImageView/Button），先排除带文字的数量标签；
-        # 找不到无文字按钮时再退回全部同级节点
-        siblings = [
-            node for node in all_siblings
-            if not (node.get(u"t") or node.get(u"d"))
-        ] or all_siblings
-        if not siblings:
-            return self._record(tree, value), {}, {}
-        minus = min(siblings, key=lambda n: tree.bounds(n)[0])
-        plus = max(siblings, key=lambda n: tree.bounds(n)[0])
+                    return child
+        band = self._label_band(tree, label)
+        digits = []
+        for node in tree.nodes.values():
+            if not tree.has_real_bounds(node):
+                continue
+            bounds = tree.bounds(node)
+            if bounds[3] < band[0] or bounds[1] > band[1]:
+                continue
+            if bounds[2] <= tree.bounds(label)[2]:
+                continue
+            text = (node.get(u"t") or u"").strip()
+            if re.fullmatch(r"\d+", text):
+                digits.append(node)
+        if not digits:
+            return None
+        return max(digits, key=lambda n: tree.bounds(n)[2])
+
+    @staticmethod
+    def _label_band(tree, label):
+        bounds = tree.bounds(label)
+        return bounds[1] - 20, bounds[3] + 20
+
+    def _qty_records_by_band(self, tree, label):
+        band = self._label_band(tree, label)
+        label_right = tree.bounds(label)[2]
+        buttons = []
+        for node in tree.nodes.values():
+            if not tree.has_real_bounds(node):
+                continue
+            bounds = tree.bounds(node)
+            if bounds[3] < band[0] or bounds[1] > band[1]:
+                continue
+            if bounds[2] <= label_right:
+                continue
+            if (node.get(u"t") or node.get(u"d") or u"").strip():
+                continue
+            buttons.append(node)
+        if len(buttons) < 2:
+            return {}, {}, {}
+        minus = min(buttons, key=lambda n: tree.bounds(n)[0])
+        plus = max(buttons, key=lambda n: tree.bounds(n)[0])
         return (
-            self._record(tree, value),
+            {},
             self._record(tree, minus),
             self._record(tree, plus),
         )
@@ -525,8 +604,12 @@ class DeviceCalibrator(object):
         if value is None:
             self._log(u"详情页数量行 10 秒内未出现，数量控件留空")
         # 数量标签「数量」单独成区：后续判定"是否在详情页"直接读这一格，
-        # 不用全页找「数量」两个大字
-        self.controls[u"qty_label"] = self._tab_record(tree, u"数量")
+        # 不用全页找「数量」两个大字。这里刻意记**文字节点本体**，
+        # 不要扩成整行容器——数字区读不到时要用它的右边界推算数字/加号。
+        label_node = tree.find_exact(u"数量")
+        self.controls[u"qty_label"] = (
+            self._record(tree, label_node) if label_node is not None else {}
+        )
         self.controls[u"qty_value"] = value
         self.controls[u"qty_minus"] = minus
         self.controls[u"qty_plus"] = plus

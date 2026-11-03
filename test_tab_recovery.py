@@ -26,12 +26,13 @@ class TabBridge(object):
     def __init__(self):
         self.page = u"home"
         self.clicks = []
+        self.package = u"com.moutai.mall"
 
     def is_connected(self):
         return True
 
     def current_package(self):
-        return u"com.moutai.mall"
+        return self.package
 
     def text_exists(self, text):
         if text == u"数量":
@@ -81,6 +82,37 @@ class TabBridge(object):
 
     def back(self):
         return True
+
+
+class StaleProfileTest(unittest.TestCase):
+    """档案区域过期/为空的兜底：不能因此把页面判成 unknown"""
+
+    def _flow(self, bridge, controls=None):
+        from device_profile import DeviceProfile
+        flow = FlowCore(bridge)
+        flow.reset(datetime(2026, 11, 3, 9, 0, 0))
+        if controls is not None:
+            flow.profile = DeviceProfile(controls=controls)
+        flow.state = NAVIGATE_IGOU
+        return flow
+
+    def test_bad_igou_region_falls_back_to_full_page(self):
+        """qty/igou 区域里没有 i购 → 仍能全页认出首页并点击 i购"""
+        bridge = TabBridge()
+        flow = self._flow(bridge, {u"igou_tab": {u"bounds": [0, 0, 10, 10]}})
+        flow.update(0.2, datetime(2026, 11, 3, 9, 0, 5))
+        self.assertEqual(bridge.page, u"igou")
+        self.assertIn(u"i购", bridge.clicks)
+
+    def test_wrong_foreground_package_does_not_block(self):
+        """前台包名取错（桌面/自己进程）也不能卡住流程"""
+        bridge = TabBridge()
+        bridge.package = u"com.huawei.android.launcher"
+        flow = self._flow(bridge)
+        flow.on_launch_app = lambda: None
+        flow.update(0.2, datetime(2026, 11, 3, 9, 0, 5))
+        self.assertEqual(bridge.page, u"igou")
+        self.assertIn(u"i购", bridge.clicks)
 
 
 class TabRecoveryTest(unittest.TestCase):

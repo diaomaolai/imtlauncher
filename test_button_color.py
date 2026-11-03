@@ -37,6 +37,7 @@ class ColorBridge(object):
         self.time_text = time_text
         self.clicks = 0
         self.backs = 0
+        self.on_detail = True
         if not with_color:
             self.average_color_in_px_region = None
 
@@ -48,7 +49,7 @@ class ColorBridge(object):
             return self.button in (u"立即抢购", u"立即购买")
         if text in SOLD_OUT_TEXTS:
             return self.button in SOLD_OUT_TEXTS
-        return text == u"数量"
+        return text == u"数量" and self.on_detail
 
     def any_text_exists(self, texts):
         return any(self.text_exists(t) for t in texts)
@@ -85,6 +86,7 @@ class ColorBridge(object):
 
     def back(self):
         self.backs += 1
+        self.on_detail = False
         return True
 
 

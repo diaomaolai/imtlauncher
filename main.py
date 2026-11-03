@@ -62,6 +62,7 @@ class FlowWorker(threading.Thread):
         self.logger = logger
         self.recal_fn = recal_fn
         self.stop_event = threading.Event()
+        self._slow_log_at = 0.0
 
     def stop(self):
         self.stop_event.set()
@@ -81,7 +82,18 @@ class FlowWorker(threading.Thread):
                     u"可能是后台被系统冻结" % (dt, self.flow.state)
                 )
             try:
+                started = time.monotonic()
                 self.flow.update(dt, now_dt)
+                cost = time.monotonic() - started
+                # 单拍识别耗时：正常应在几十毫秒；超过 0.3 秒说明
+                # 这拍的全树扫描/截图偏慢（节流 5 秒记一条）
+                if cost >= 0.3 and self.logger is not None \
+                        and time.monotonic() - self._slow_log_at >= 5.0:
+                    self._slow_log_at = time.monotonic()
+                    self.logger.log(
+                        u"单拍识别耗时 %.0f ms（state=%s），偏慢"
+                        % (cost * 1000.0, self.flow.state)
+                    )
             except Exception as exc:
                 if self.logger is not None:
                     self.logger.log(u"流程推进异常: %s" % exc)

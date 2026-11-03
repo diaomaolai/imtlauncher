@@ -886,7 +886,9 @@ public class MtA11yService extends AccessibilityService {
             return null;
         }
         try {
-            if (!latch.await(3, TimeUnit.SECONDS)) {
+            // 取色只是"辅助判断"，不能拖慢点击：最多等 800ms，
+            // 超时返回 null，调用方按文字判断（宁可点，不要卡）。
+            if (!latch.await(800, TimeUnit.MILLISECONDS)) {
                 return null;
             }
         } catch (InterruptedException e) {

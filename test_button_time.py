@@ -31,12 +31,15 @@ class FakeBridge(object):
         self.explanation = u"每日09:00、20:00投放"
         self.button = u"09:00投放"
         self.backs = 0
+        self.on_detail = True
 
     def is_connected(self):
         return True
 
     def text_exists(self, text):
-        return text in (u"数量", self.explanation, self.button)
+        if text == u"数量":
+            return self.on_detail
+        return text in (self.explanation, self.button)
 
     def any_text_exists(self, texts):
         return any(self.text_exists(t) for t in texts)
@@ -75,6 +78,7 @@ class FakeBridge(object):
 
     def back(self):
         self.backs += 1
+        self.on_detail = False
         return True
 
 
