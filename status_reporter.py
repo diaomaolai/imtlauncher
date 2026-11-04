@@ -31,6 +31,7 @@ PAYLOAD_FORMAT = u"%s;%s;%s;%s;%s"
 
 
 def now_text():
+    """当前时间文本。"""
     return datetime.now().strftime(u"%Y-%m-%d %H:%M:%S")
 
 
@@ -38,6 +39,7 @@ class StatusStore(object):
     """抢购状态与卡密的本地持久化（重启不丢）"""
 
     def __init__(self):
+        """初始化 StatusStore 实例。"""
         self.path = os.path.join(resolve_log_dir(), STORE_FILE)
         self.data = {
             u"card_no": u"",
@@ -49,6 +51,7 @@ class StatusStore(object):
         self._load()
 
     def _load(self):
+        """从文件加载。"""
         try:
             with open(self.path, u"r", encoding="utf-8") as f:
                 loaded = json.load(f)
@@ -58,6 +61,7 @@ class StatusStore(object):
             pass
 
     def _save(self):
+        """写入文件。"""
         try:
             with open(self.path, u"w", encoding="utf-8") as f:
                 json.dump(self.data, f, ensure_ascii=False)
@@ -95,6 +99,7 @@ class StatusStore(object):
         return bool(self.data.get(u"scheduled_time"))
 
     def snapshot(self):
+        """当前待报状态快照。"""
         return dict(self.data)
 
     def build_payload(self, device_code, card_no, now=None):

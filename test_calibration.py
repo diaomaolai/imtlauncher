@@ -22,6 +22,7 @@ from config import (
     QTY_VALUE_REGION_PX,
     BUTTON_REGION_PX,
     RUNTIME_STALL_RECAL_SECONDS,
+    STALL_RECAL_AFTER,
 )
 from device_profile import DeviceProfile, ProfileStore
 from calibration import DeviceCalibrator, NodeTree
@@ -437,7 +438,9 @@ class TestStallRecalibration(unittest.TestCase):
         flow = FlowCore(bridge)
         flow.reset(datetime.now())
         flow._goto(NAVIGATE_IGOU, u"导航中…")
-        ticks = int(RUNTIME_STALL_RECAL_SECONDS / 0.3) + 2
+        # 每 1 秒计一次，连续 STALL_RECAL_AFTER 次才重校
+        need_seconds = RUNTIME_STALL_RECAL_SECONDS * STALL_RECAL_AFTER
+        ticks = int(need_seconds / 0.3) + 4
         for _ in range(ticks):
             flow.update(0.3, datetime.now())
         self.assertTrue(flow.needs_recalibration)
@@ -445,11 +448,21 @@ class TestStallRecalibration(unittest.TestCase):
     def test_stall_counter_resets_on_goto(self):
         flow = FlowCore(FlowMockBridge())
         flow._goto(NAVIGATE_IGOU, u"导航中…")
-        flow._tick_stall(10.0)
-        self.assertEqual(flow._stall_seconds, 10.0)
+        # 1.2 秒 → 计 1 次
+        flow._tick_stall(0.6)
+        flow._tick_stall(0.6)
+        self.assertEqual(flow._stall_count, 1)
         flow._goto(NAVIGATE_IGOU, u"重新导航…")
-        self.assertEqual(flow._stall_seconds, 0.0)
+        self.assertEqual(flow._stall_count, 0)
         self.assertFalse(flow.needs_recalibration)
+
+    def test_freeze_jump_counts_as_three(self):
+        """冻结跳时（dt=60）按 3 次封顶计：立即重校，但不记 60 次"""
+        flow = FlowCore(FlowMockBridge())
+        flow._goto(NAVIGATE_IGOU, u"导航中…")
+        flow._tick_stall(60.0)
+        self.assertTrue(flow.needs_recalibration)
+        self.assertEqual(flow._stall_count, 3)
 
 
 if __name__ == u"__main__":

@@ -48,6 +48,7 @@ class SlotMonitor(threading.Thread):
     """场次监控守护线程，每 0.5 秒检查一次"""
 
     def __init__(self, is_running_fn, autostart_fn, logger=None):
+        """初始化 SlotMonitor 实例。"""
         super(SlotMonitor, self).__init__(daemon=True)
         self.is_running_fn = is_running_fn
         self.autostart_fn = autostart_fn
@@ -62,9 +63,11 @@ class SlotMonitor(threading.Thread):
         self.enabled = bool(enabled)
 
     def stop(self):
+        """请求停止线程/服务。"""
         self._stop_event.set()
 
     def _log(self, line):
+        """写一行日志。"""
         if self.logger is not None:
             self.logger.log(line)
         else:
@@ -130,6 +133,7 @@ class SlotMonitor(threading.Thread):
                 self._log(u"自启动武装流程异常：%s" % exc)
 
     def run(self):
+        """线程/流程主循环。"""
         while not self._stop_event.is_set():
             try:
                 self.check_once(datetime.now())

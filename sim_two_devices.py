@@ -31,6 +31,7 @@ from config import (
     QTY_VALUE_REGION_PX,
     PRODUCT_FULL_TEXTS,
     RUNTIME_STALL_RECAL_SECONDS,
+    STALL_RECAL_AFTER,
 )
 from device_profile import ProfileStore
 from calibration import DeviceCalibrator
@@ -443,7 +444,7 @@ def main():
         empty = EmptyBridge(HUAWEI_GEO, 1200, 2652)
         stall_flow = FlowCore(empty)
         stall_flow._goto(NAVIGATE_IGOU, u"导航中…")
-        ticks = int(RUNTIME_STALL_RECAL_SECONDS / 0.3) + 2
+        ticks = int(RUNTIME_STALL_RECAL_SECONDS * STALL_RECAL_AFTER / 0.3) + 4
         for _ in range(ticks):
             stall_flow.update(0.3, datetime.now())
         assert stall_flow.needs_recalibration

@@ -11,6 +11,7 @@ SERVICE_CLASS = u"org.personal.imtlauncher.KeepAliveService"
 
 
 def _emit(logger, line):
+    """输出一行日志。"""
     if logger is not None:
         logger.log(line)
     else:
@@ -18,6 +19,7 @@ def _emit(logger, line):
 
 
 def _intent():
+    """构造前台保活服务的 Intent。"""
     from jnius import autoclass
     PythonActivity = autoclass(u"org.kivy.android.PythonActivity")
     activity = PythonActivity.mActivity

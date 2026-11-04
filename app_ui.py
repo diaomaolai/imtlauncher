@@ -53,6 +53,7 @@ class MainScreen(BoxLayout):
     """主界面：卡密授权 + 定时设置"""
 
     def __init__(self, **kwargs):
+        """初始化 MainScreen 实例。"""
         super(MainScreen, self).__init__(**kwargs)
         self.orientation = "vertical"
         # padding/spacing 用 dp：随屏幕密度自动缩放，不同分辨率观感一致
@@ -265,6 +266,7 @@ class MainScreen(BoxLayout):
         self.add_widget(Widget(size_hint=(1, 0.04)))
 
     def _redraw_background(self, *args):
+        """重绘界面背景。"""
         self._background.pos = self.pos
         self._background.size = self.size
 

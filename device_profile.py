@@ -139,6 +139,7 @@ def build_fingerprint():
 
 
 def pkg_default():
+    """默认 i茅台包名。"""
     return MOUTAI_PACKAGE
 
 
@@ -151,6 +152,7 @@ class DeviceProfile(object):
 
     def __init__(self, fingerprint=None, controls=None,
                  metrics=None, screenshots=None):
+        """初始化 DeviceProfile 实例。"""
         self.fingerprint = fingerprint or {}
         self.controls = controls or {}
         self.metrics = metrics or {}
@@ -158,6 +160,7 @@ class DeviceProfile(object):
         self.collected_at = datetime.now().strftime(u"%Y-%m-%d %H:%M:%S")
 
     def to_dict(self):
+        """序列化为字典。"""
         return {
             u"schema": PROFILE_SCHEMA,
             u"collected_at": self.collected_at,
@@ -169,6 +172,7 @@ class DeviceProfile(object):
 
     @classmethod
     def from_dict(cls, data):
+        """从字典还原档案。"""
         profile = cls(
             fingerprint=data.get(u"fingerprint", {}),
             controls=data.get(u"controls", {}),
@@ -193,6 +197,7 @@ class DeviceProfile(object):
 # ------------------------------------------------------------------
 
 def _safe_name(value):
+    """文件名安全化（去掉路径非法字符）。"""
     return re.sub(r"[^A-Za-z0-9_.-]+", u"_", str(value)).strip(u"_")
 
 
@@ -200,6 +205,7 @@ class ProfileStore(object):
     """profiles/ 目录下的档案读写与匹配"""
 
     def __init__(self, base_dir=None, logger=None):
+        """初始化 ProfileStore 实例。"""
         base = base_dir or resolve_files_dir()
         self.dir = os.path.join(base, PROFILE_DIR_NAME)
         self.logger = logger
@@ -207,10 +213,12 @@ class ProfileStore(object):
             os.makedirs(self.dir)
 
     def _log(self, line):
+        """写一行日志。"""
         if self.logger is not None:
             self.logger.log(line)
 
     def _stem(self, fingerprint):
+        """档案文件名主干。"""
         name = u"%s_%s_%sx%s_%s" % (
             fingerprint.get(u"brand", u"unknown"),
             fingerprint.get(u"model", u"unknown"),
@@ -221,11 +229,13 @@ class ProfileStore(object):
         return _safe_name(name)
 
     def json_path(self, fingerprint):
+        """档案 JSON 路径。"""
         return os.path.join(
             self.dir, u"profile_%s.json" % self._stem(fingerprint)
         )
 
     def txt_path(self, fingerprint):
+        """档案说明 TXT 路径。"""
         return os.path.join(
             self.dir, u"profile_%s_说明.txt" % self._stem(fingerprint)
         )
@@ -245,6 +255,7 @@ class ProfileStore(object):
         return json_path
 
     def load_all(self):
+        """加载目录下全部档案。"""
         profiles = []
         for name in os.listdir(self.dir):
             if not name.endswith(u".json") or not name.startswith(u"profile_"):
@@ -270,6 +281,7 @@ class ProfileStore(object):
 
     @staticmethod
     def _bounds_text(bounds):
+        """bounds 转可读文本。"""
         if not bounds:
             return u"未采集"
         return u"[%d,%d][%d,%d]" % (
@@ -277,6 +289,7 @@ class ProfileStore(object):
         )
 
     def _render_text(self, profile):
+        """生成档案说明文本。"""
         fp = profile.fingerprint
         controls = profile.controls
         lines = [

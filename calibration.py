@@ -45,6 +45,7 @@ class NodeTree(object):
     """把扁平 dump 组织成带父链/子表的树，供 bounds 提取"""
 
     def __init__(self, raw_nodes):
+        """初始化 NodeTree 实例。"""
         self.nodes = {}
         self.children = {}
         for node in raw_nodes:
@@ -57,6 +58,7 @@ class NodeTree(object):
             ).append(node)
 
     def parent(self, node):
+        """返回父节点。"""
         p_index = int(node.get(u"p", -1))
         if p_index < 0:
             return None
@@ -65,12 +67,14 @@ class NodeTree(object):
         )
 
     def ancestors(self, node):
+        """自下而上遍历祖先节点。"""
         cur = self.parent(node)
         while cur is not None:
             yield cur
             cur = self.parent(cur)
 
     def siblings(self, node):
+        """返回同级节点列表。"""
         p_index = int(node.get(u"p", -1))
         return self.children.get(
             (int(node.get(u"window", 0)), p_index), []
@@ -78,14 +82,17 @@ class NodeTree(object):
 
     @staticmethod
     def bounds(node):
+        """返回节点屏幕坐标 [left, top, right, bottom]。"""
         return [int(v) for v in node.get(u"b", [0, 0, 0, 0])]
 
     @classmethod
     def has_real_bounds(cls, node):
+        """节点是否有真实宽高（排除 0x0 占位节点）。"""
         left, top, right, bottom = cls.bounds(node)
         return right - left > 1 and bottom - top > 1
 
     def first_real_ancestor(self, node):
+        """自身或最近的带真实 bounds 的祖先。"""
         if self.has_real_bounds(node):
             return node
         for ancestor in self.ancestors(node):
@@ -142,6 +149,7 @@ class DeviceCalibrator(object):
     """
 
     def __init__(self, bridge, store, logger, stop_event=None):
+        """初始化 DeviceCalibrator 实例。"""
         self.bridge = bridge
         self.store = store
         self.logger = logger
@@ -153,15 +161,18 @@ class DeviceCalibrator(object):
         self.screenshots = []
 
     def _log(self, line):
+        """写一行日志。"""
         if self.logger is not None:
             self.logger.log(line)
         else:
             print(line)
 
     def _stopped(self):
+        """是否已请求停止校准。"""
         return self.stop_event is not None and self.stop_event.is_set()
 
     def _wait(self, seconds):
+        """可被 stop_event 打断的等待。"""
         if self.stop_event is not None:
             self.stop_event.wait(seconds)
         else:
@@ -262,6 +273,7 @@ class DeviceCalibrator(object):
     # ---------------- 截图与 dump ----------------
 
     def _capture(self, stage, filename):
+        """截图存证；失败只记日志，不影响节点数据。"""
         path = os.path.join(self.shot_dir, filename)
         if self.bridge.save_screenshot(path):
             self.screenshots.append({u"stage": stage, u"path": path})
@@ -271,12 +283,14 @@ class DeviceCalibrator(object):
                       % stage)
 
     def _dump_tree(self):
+        """dump 全量节点并构造成 NodeTree。"""
         return NodeTree(self.bridge.dump_nodes())
 
     # ---------------- bounds 提取 ----------------
 
     @staticmethod
     def _record(tree, node):
+        """把节点 bounds 转成档案记录（bounds + center）。"""
         bounds = tree.bounds(node)
         return {
             u"bounds": bounds,
@@ -334,6 +348,7 @@ class DeviceCalibrator(object):
         return records
 
     def _year_records(self, tree):
+        """采集 7 个年份格的档案记录。"""
         records = {}
         for node in tree.nodes.values():
             year = (node.get(u"t") or u"").strip()
@@ -403,10 +418,12 @@ class DeviceCalibrator(object):
 
     @staticmethod
     def _label_band(tree, label):
+        """「数量」标签所在的上下行带。"""
         bounds = tree.bounds(label)
         return bounds[1] - 20, bounds[3] + 20
 
     def _qty_records_by_band(self, tree, label):
+        """按「数量」行带找减号/加号（层级不同时的兜底）。"""
         band = self._label_band(tree, label)
         label_right = tree.bounds(label)[2]
         buttons = []
@@ -475,6 +492,7 @@ class DeviceCalibrator(object):
         return None
 
     def _button_record(self, tree):
+        """记录按钮节点区域。"""
         node = self._button_node(tree)
         if node is None:
             return {}
@@ -500,6 +518,7 @@ class DeviceCalibrator(object):
     # ---------------- 主流程 ----------------
 
     def run(self):
+        """线程/流程主循环。"""
         if not self.bridge.is_connected():
             return False, u"无障碍服务未开启，无法校准"
 
@@ -642,11 +661,13 @@ class DeviceCalibrator(object):
         return True, profile
 
     def _build_fingerprint(self):
+        """读取设备指纹（机型/宽高/i茅台版本）。"""
         from device_profile import build_fingerprint
         return build_fingerprint()
 
     @staticmethod
     def _derive_metrics(native):
+        """由原始宽高与密度推导 dp 尺寸等指标。"""
         width = native.get(u"screen_w", 0)
         height = native.get(u"screen_h", 0)
         density = native.get(u"density", 0.0)

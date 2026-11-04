@@ -24,11 +24,13 @@ class CardStore(object):
     """最近一次登录成功卡密的本地持久化（重启不丢）"""
 
     def __init__(self):
+        """初始化 CardStore 实例。"""
         self.path = os.path.join(resolve_log_dir(), CARD_STORE_FILE)
         self.card_no = u""
         self._load()
 
     def _load(self):
+        """从文件加载。"""
         try:
             with open(self.path, u"r", encoding="utf-8") as f:
                 data = json.load(f)

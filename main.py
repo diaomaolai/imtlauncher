@@ -57,6 +57,7 @@ class FlowWorker(threading.Thread):
     """
 
     def __init__(self, flow, logger=None, recal_fn=None):
+        """初始化 FlowWorker 实例。"""
         super(FlowWorker, self).__init__(daemon=True)
         self.flow = flow
         self.logger = logger
@@ -65,9 +66,11 @@ class FlowWorker(threading.Thread):
         self._slow_log_at = 0.0
 
     def stop(self):
+        """请求停止线程/服务。"""
         self.stop_event.set()
 
     def run(self):
+        """线程/流程主循环。"""
         last = time.monotonic()
         while not self.stop_event.is_set() and not self.flow.is_done:
             current = time.monotonic()
@@ -81,6 +84,10 @@ class FlowWorker(threading.Thread):
                     u"检测到流程停顿 %.1f 秒（state=%s），"
                     u"可能是后台被系统冻结" % (dt, self.flow.state)
                 )
+            # 跳时最多按 3 秒处理：冻结 60 秒后，不能把这 60 秒
+            # 一次性喂给各计时器（会把连点等待/宽限/停滞计数一次吃光）。
+            if dt > 3.0:
+                dt = 3.0
             try:
                 started = time.monotonic()
                 self.flow.update(dt, now_dt)
@@ -153,11 +160,13 @@ class CalibrationWorker(threading.Thread):
     """
 
     def __init__(self, calibrator, on_done):
+        """初始化 CalibrationWorker 实例。"""
         super(CalibrationWorker, self).__init__(daemon=True)
         self.calibrator = calibrator
         self.on_done = on_done
 
     def run(self):
+        """线程/流程主循环。"""
         try:
             ok, result = self.calibrator.run()
         except Exception as exc:
@@ -174,6 +183,7 @@ class IMtAssistantApp(App):
     """Kivy 应用主类"""
 
     def build(self):
+        """构建界面与各功能模块。"""
         self.title = APP_TITLE
 
         # 功能模块
@@ -220,9 +230,11 @@ class IMtAssistantApp(App):
         Clock.schedule_once(lambda _dt: fn())
 
     def _card_and_device(self):
+        """读取界面上的卡密与设备 ID。"""
         return self.screen.get_card_key(), self.screen.get_device_code()
 
     def _is_flow_running(self):
+        """流程是否在跑（未结束）。"""
         return (
             self.flow_worker is not None
             and not self.flow.is_done
@@ -263,6 +275,7 @@ class IMtAssistantApp(App):
 
         def on_done(ok, result):
             # 本回调在 CalibrationWorker 工作线程执行
+            """校准结束回调（在工作线程执行）。"""
             if stop_event.is_set():
                 self.app_logger.log(u"校准已取消，忽略本次结果")
                 return
@@ -275,6 +288,7 @@ class IMtAssistantApp(App):
                 return
 
             def fail_ui():
+                """校准失败时恢复界面。"""
                 self.screen.set_login_button_busy(False)
                 self.screen.schedule_btn.disabled = False
                 self.screen.set_status(u"设备校准失败：%s" % result)
@@ -300,6 +314,7 @@ class IMtAssistantApp(App):
         self.screen.set_status(u"正在进行卡密授权登录…")
 
         def work():
+            """后台任务（网络请求/校准/查询）。"""
             ok, msg, _data = card_client.card_login(
                 card, device, self.app_logger
             )
@@ -307,6 +322,7 @@ class IMtAssistantApp(App):
                 self.app_logger.log(u"卡密登录失败：%s" % msg)
 
                 def fail():
+                    """失败回调（切回 UI 线程）。"""
                     self.screen.set_login_button_busy(False)
                     self.card_unlocked = False
                     self.screen.set_unlocked(False)
@@ -324,6 +340,7 @@ class IMtAssistantApp(App):
             )
 
             def done():
+                """成功回调（切回 UI 线程）。"""
                 self.card_unlocked = True
                 # 登录成功后持久化卡密，重启自动回填
                 self.card_store.save(card)
@@ -378,6 +395,7 @@ class IMtAssistantApp(App):
         self.app_logger.log(u"订单/支付页出现，抢购成功：%s" % payload)
 
         def work():
+            """后台任务（网络请求/校准/查询）。"""
             ok1, m1, _ = card_client.rush_record(
                 card, payload, 1, self.app_logger
             )
@@ -472,6 +490,7 @@ class IMtAssistantApp(App):
         self.screen.schedule_btn.disabled = True
 
         def work():
+            """后台任务（网络请求/校准/查询）。"""
             ok, msg, _data = card_client.card_login(
                 card, device, self.app_logger
             )
@@ -479,6 +498,7 @@ class IMtAssistantApp(App):
                 self.app_logger.log(u"定时前卡密校验失败：%s" % msg)
 
                 def fail():
+                    """失败回调（切回 UI 线程）。"""
                     self.card_unlocked = False
                     self.screen.set_unlocked(False)
                     self.slot_monitor.set_enabled(False)
@@ -535,6 +555,7 @@ class IMtAssistantApp(App):
 
         def on_done(ok, result):
             # 在 CalibrationWorker 工作线程执行
+            """校准结束回调（在工作线程执行）。"""
             if stop_event.is_set():
                 self.app_logger.log(u"重校已取消，忽略本次结果")
                 return
@@ -576,6 +597,7 @@ class IMtAssistantApp(App):
 
     # ---------------- 界面刷新 ----------------
     def _tick(self, dt):
+        """Kivy 定时刷新倒计时与状态。"""
         if self.flow.is_done:
             # 不再杀进程：保留进程与监控守护线程盯后续场次，
             # 退出由用户手动操作。
@@ -602,10 +624,12 @@ class IMtAssistantApp(App):
     def on_pause(self):
         # 允许后台驻留：返回 True，普通线程（FlowWorker/SlotMonitor）
         # 在后台继续等待与抢购
+        """切到后台：不暂停业务线程。"""
         return True
 
 
 def main():
+    """应用入口。"""
     register_cjk_font()
     IMtAssistantApp().run()
 

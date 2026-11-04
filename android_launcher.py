@@ -17,6 +17,7 @@ def launch_app(package_name, logger=None):
     返回 True 表示成功下发启动意图，False 表示未找到 / 不在安卓环境。
     """
     def _emit(line):
+        """输出一行日志。"""
         if logger is not None:
             logger.log(line)
         else:

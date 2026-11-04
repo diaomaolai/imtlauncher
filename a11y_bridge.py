@@ -31,6 +31,7 @@ class A11yBridge(object):
     """无障碍服务的 Python 封装"""
 
     def __init__(self):
+        """初始化 A11yBridge 实例。"""
         self._service_class = None
         # 服务端是否支持 anyTextExists（旧 APK 没有，首次失败后退回）
         self._any_supported = True
@@ -51,6 +52,7 @@ class A11yBridge(object):
 
     @property
     def is_android(self):
+        """是否运行在 Android（有 jnius 与服务类）。"""
         return _ANDROID
 
     def is_connected(self):

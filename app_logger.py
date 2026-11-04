@@ -51,6 +51,7 @@ class AppLogger(object):
     """统一日志记录器：控制台 + txt 文件"""
 
     def __init__(self):
+        """初始化 AppLogger 实例。"""
         self.log_dir = resolve_log_dir()
         stamp = datetime.now().strftime(u"%Y%m%d_%H%M%S")
         self.session_file = os.path.join(

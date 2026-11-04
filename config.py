@@ -11,7 +11,7 @@ import time
 
 # ---------------- 基础信息 ----------------
 APP_TITLE = u"i茅台助手"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 
 # 目标设备基准：OPPO PDSM00 1080x2400（下面所有绝对像素都按此实测）
 
@@ -209,9 +209,16 @@ CALIBRATION_MAX_CLICK_RETRIES = 2
 # 截图目录名（位于 profiles/ 下）
 CALIBRATION_SHOT_DIR_NAME = u"calibration_shots"
 
-# 运行时停滞重校：已连接但同一状态持续找不到应有节点超过该秒数，
-# 判定节点对不上（页面改版/档案失效），自动重新校准
-RUNTIME_STALL_RECAL_SECONDS = 60.0
+# 运行时停滞重校：每 1 秒判定一次"这一秒有没有推进"。
+# 连续 STALL_RECAL_AFTER 次（默认 3 次 ≈ 3 秒）都没推进，
+# 才判定节点对不上（页面改版/档案失效）并触发重新校准；
+# 不再等 60 秒。
+RUNTIME_STALL_RECAL_SECONDS = 1.0
+STALL_RECAL_AFTER = 3
+# 单拍 dt 超过该秒数视为"进程被冻结/挂起后的跳时"：
+# 折算次数封顶为 STALL_RECAL_AFTER（int 结果 = 3），
+# 即跳时只触发一次重校，而不是记 60 次。
+FREEZE_JUMP_SECONDS = 2.0
 
 # ---------------- 启动后导航（i购 → 经典）----------------
 # 拉起 i茅台后先做区域限定识别点击：首页底部点「i购」→

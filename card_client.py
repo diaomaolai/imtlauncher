@@ -111,6 +111,7 @@ def _result(path, body, log=None):
     证书校验失败时降级为不校验证书重试一次（保证弱环境可达）。
     """
     def _emit(line):
+        """输出一行日志。"""
         if log is not None:
             try:
                 log(line)

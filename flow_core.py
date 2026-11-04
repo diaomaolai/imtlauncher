@@ -101,6 +101,8 @@ from config import (
     QTY_REGEX,
     QTY_MAX_TAPS,
     RUNTIME_STALL_RECAL_SECONDS,
+    STALL_RECAL_AFTER,
+    FREEZE_JUMP_SECONDS,
     MANUAL_LAUNCH_LEAD_SECONDS,
 )
 
@@ -124,6 +126,7 @@ class FlowCore(object):
     """循环申购状态机"""
 
     def __init__(self, bridge, logger=None):
+        """初始化 FlowCore 实例。"""
         self.bridge = bridge
         self.logger = logger
         # 设备档案（自动校准生成）：运行时以实时节点树为主，
@@ -141,8 +144,9 @@ class FlowCore(object):
         self._stable_count = 0
         self._buy_verified = False
         self._soldout_pending = False
-        # 节点对不上停滞检测：同一状态累计找不到控件的秒数
+        # 节点对不上停滞检测：同一状态累计找不到控件的秒数/次数
         self._stall_seconds = 0.0
+        self._stall_count = 0
         self.needs_recalibration = False
         # 连点模式：累计点击次数 + 距离下一次点击还剩的随机间隔
         self._rapid_click_count = 0
@@ -200,6 +204,7 @@ class FlowCore(object):
 
     # ---------------- 日志 ----------------
     def _log(self, message):
+        """写一行日志。"""
         if self.logger is not None:
             self.logger.log(message)
         else:
@@ -207,11 +212,13 @@ class FlowCore(object):
 
     # ---------------- 档案 bounds 兜底 ----------------
     def _profile_controls(self):
+        """当前档案的 controls 字典。"""
         if self.profile is None:
             return {}
         return self.profile.controls or {}
 
     def _profile_record(self, control_key, sub_key=None):
+        """取某控件的档案记录。"""
         controls = self._profile_controls()
         if sub_key is None:
             record = controls.get(control_key)
@@ -221,6 +228,7 @@ class FlowCore(object):
         return record if isinstance(record, dict) else None
 
     def _profile_bounds(self, control_key, sub_key=None):
+        """取某控件的档案 bounds。"""
         record = self._profile_record(control_key, sub_key)
         if record is None:
             return None
@@ -230,6 +238,7 @@ class FlowCore(object):
         return tuple(int(v) for v in bounds)
 
     def _profile_center(self, control_key, sub_key=None):
+        """取某控件的档案中心坐标。"""
         record = self._profile_record(control_key, sub_key)
         if record is None:
             return None
@@ -247,6 +256,7 @@ class FlowCore(object):
         return self._profile_bounds(control_key, sub_key) or legacy_region
 
     def _button_region(self):
+        """按钮识别区（档案优先，无档案用固定 px）。"""
         return self._region(u"action_button", BUTTON_REGION_PX)
 
     def _button_time_hits(self):
@@ -362,15 +372,45 @@ class FlowCore(object):
         return state
 
     def _tick_stall(self, dt):
-        """等待分支累计停滞；超阈值请求自动重校"""
+        """
+        停滞计数：每 RUNTIME_STALL_RECAL_SECONDS（1 秒）判定一次；
+        连续 STALL_RECAL_AFTER 次（3 次）没推进才请求重校。
+
+        dt 超过 FREEZE_JUMP_SECONDS（如冻结后跳 60 秒）按跳时处理：
+        折算次数封顶为 STALL_RECAL_AFTER（即 int 结果 = 3），
+        记一次重校，而不是记 60 次、也不是完全忽略。
+        """
+        if dt > FREEZE_JUMP_SECONDS:
+            jumps = int(dt / RUNTIME_STALL_RECAL_SECONDS)
+            jumps = min(max(1, jumps), STALL_RECAL_AFTER)
+            self._stall_count += jumps
+            self._stall_seconds = 0.0
+            self._log(
+                u"检测到 %.1f 秒跳时，按 %d 次停滞计" % (dt, jumps)
+            )
+            if self._stall_count >= STALL_RECAL_AFTER:
+                self.needs_recalibration = True
+                self._log(
+                    u"跳时后立即重新校准（累计 %d 次）"
+                    % self._stall_count
+                )
+            return
         self._stall_seconds += dt
-        if self._stall_seconds >= RUNTIME_STALL_RECAL_SECONDS:
-            self.needs_recalibration = True
-            self._log(u"节点持续对不上，请求自动重新校准")
+        if self._stall_seconds < RUNTIME_STALL_RECAL_SECONDS:
+            return
+        self._stall_count += 1
+        self._stall_seconds = 0.0
+        if self._stall_count < STALL_RECAL_AFTER:
+            return
+        self.needs_recalibration = True
+        self._log(
+            u"连续 %d 次 1 秒未推进，判定节点对不上，请求重新校准"
+            % self._stall_count
+        )
 
     def _stuck_recover(self, next_state, do_back=True):
         """
-        当前状态 3 秒没有推进 → 本地恢复（不等 60 秒重校）。
+        当前状态 3 秒没有推进 → 本地恢复（不等重校）。
         默认 back 回列表再重进；next_state 由调用方指定。
         """
         if self._state_elapsed < STUCK_RECOVER_SECONDS:
@@ -450,6 +490,7 @@ class FlowCore(object):
         self._buy_verified = False
         self._soldout_pending = False
         self._stall_seconds = 0.0
+        self._stall_count = 0
         self.needs_recalibration = False
         self._rapid_click_count = 0
         self._rapid_wait_left = 0.0
@@ -488,9 +529,11 @@ class FlowCore(object):
 
     @property
     def is_done(self):
+        """流程是否已结束。"""
         return self.state == DONE
 
     def _finish(self, success, message):
+        """结束流程（成功/售罄/异常统一入口）。"""
         self.success = success
         self.state = DONE
         # 复盘用：本场被并发提示挡了多少次
@@ -503,6 +546,7 @@ class FlowCore(object):
 
     # ---------------- 主循环 ----------------
     def update(self, dt, now):
+        """推进状态机一帧。"""
         self._state_elapsed += dt
         # 手机桌面/其他 APP（如误触 Home、切到微信）→ 先把 i茅台 拉回前台。
         # 用前台包名判断，比在桌面图标里找 i购/经典 可靠；
@@ -556,6 +600,7 @@ class FlowCore(object):
         if state == SELECT_QTY:
             self._qty_blind_done = False
         self._stall_seconds = 0.0
+        self._stall_count = 0
         # 年份、数量各自独立计时 3 秒宽限：年份加载慢不能把数量的
         # 宽限一起吃掉，否则会跳过"改 6 瓶"。
         if state in (SELECT_YEAR, SELECT_QTY, READ_DETAIL):
@@ -572,10 +617,14 @@ class FlowCore(object):
         # 注意：_soldout_pending 不在此重置，售罄复核要跨 ENTER→READ 保留
 
     def _heartbeat_log(self, dt, message):
-        """等待期间按 WAIT_HEARTBEAT 周期记录心跳"""
+        """等待期间按 WAIT_HEARTBEAT 周期记录心跳（附当前页面判定）"""
         self._heartbeat += dt
         if self._heartbeat >= WAIT_HEARTBEAT:
-            self._log(message)
+            try:
+                page = self._current_page()
+            except Exception:
+                page = u"?"
+            self._log(u"%s（当前页面判定：%s）" % (message, page))
             self._heartbeat = 0.0
 
     def _product_center(self):
@@ -945,7 +994,10 @@ class FlowCore(object):
                     % center
                 )
                 if self._click_product():
-                    self._goto(SELECT_YEAR, u"已进入商品，识别年份规格…")
+                    # 点完必须确认真的到了详情页（「数量」出现）：
+                    # 没到就 2 秒内回 NAV 重判，而不是直接进年份、
+                    # 然后在列表页上空等 60 秒触发重校。
+                    self._goto(WAIT_DETAIL, u"已点商品，等待详情页…")
                     return
                 self._tick_stall(dt)
                 self.status = u"点击目标商品失败，重试…"
@@ -966,6 +1018,11 @@ class FlowCore(object):
                 # 兜底：区域没命中（档案旧/布局变），全页点一次
                 self._log(u"「经典」区域点击失败，改全页文字点击")
                 self.bridge.click_text(JINGDIAN_TAB_TEXT)
+            # 点完验证：还停在 i购 说明点到了不可点的祖先，补一次全页点击
+            time.sleep(0.15)
+            if self._current_page() == u"igou":
+                self._log(u"点击经典后仍停在 i购，补点一次全页文字")
+                self.bridge.click_text(JINGDIAN_TAB_TEXT)
             self.status = u"已点击经典，等待商品列表…"
             return
 
@@ -979,6 +1036,11 @@ class FlowCore(object):
             ):
                 # 兜底：区域没命中（档案旧/布局变），全页点一次
                 self._log(u"「i购」区域点击失败，改全页文字点击")
+                self.bridge.click_text(IGOU_TAB_TEXT)
+            # 点完验证：还停在首页说明没点进去，补一次全页点击
+            time.sleep(0.15)
+            if self._current_page() == u"home":
+                self._log(u"点击 i购 后仍停在首页，补点一次全页文字")
                 self.bridge.click_text(IGOU_TAB_TEXT)
             self.status = u"已点击 i购，等待页面加载…"
             return
@@ -1019,7 +1081,7 @@ class FlowCore(object):
                 u"位置 (%d, %d)" % center
             )
             if self._click_product():
-                self._goto(SELECT_YEAR, u"已进入商品，识别年份规格…")
+                self._goto(WAIT_DETAIL, u"已点商品，等待详情页…")
                 return
             self._tick_stall(dt)
             self.status = u"点击目标商品失败，重试…"
@@ -1650,7 +1712,7 @@ class FlowCore(object):
                     u"节点点击失败，固定坐标兜底 tap (%d, %d)" % (x, y)
                 )
                 self.bridge.tap_px(x, y, TAP_JITTER_PX)
-            self._goto(SELECT_YEAR, u"整点进入，识别年份规格…")
+            self._goto(WAIT_DETAIL, u"整点已点商品，等待详情页…")
             return
 
         # igou/home：到点仍停在浅层，交 NAV 从当前页快速接入
