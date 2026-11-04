@@ -396,12 +396,12 @@ class FlowCore(object):
 
     def _tick_stall(self, dt):
         """
-        停滞计数：每 RUNTIME_STALL_RECAL_SECONDS（1 秒）判定一次；
-        连续 STALL_RECAL_AFTER 次没推进才请求重校。
+        停滞计数（当前所有调用点已停用，函数保留可单测）。
 
-        dt 超过 FREEZE_JUMP_SECONDS（如冻结后跳 60 秒）按跳时处理：
-        默认（FREEZE_JUMP_TRIGGERS_RECAL=False）只记日志并清零计数，
-        不触发重校——冻结是系统行为，不是节点对不上，重校只会雪上加霜。
+        多轮次实拍：i茅台 从后台拉回要 10~18 秒加载，这期间页面认不出，
+        停滞计数会在"加载中"误判"节点对不上"触发重校，重校又冷启动，
+        恶性循环。结论：加载中一律动态等待（等同首轮行为），不再重校；
+        各状态的本地恢复（_stuck_recover/限频拉起）继续兜底。
         """
         if dt > FREEZE_JUMP_SECONDS:
             if FREEZE_JUMP_TRIGGERS_RECAL:
@@ -1017,7 +1017,7 @@ class FlowCore(object):
           list   → 点飞天进详情；
           igou   → 区域内点经典，等列表；
           home   → 区域内点 i购，等 i购；
-          unknown→ 加载中，动态等待（停滞累计，超限触发重校）。
+          unknown→ 加载中，动态等待，限频拉起重试（不再重校）。
         """
         if not self.bridge.is_connected():
             self._finish(
@@ -1044,14 +1044,12 @@ class FlowCore(object):
                 if self._click_product():
                     # 点完必须确认真的到了详情页（「数量」出现）：
                     # 没到就 2 秒内回 NAV 重判，而不是直接进年份、
-                    # 然后在列表页上空等 60 秒触发重校。
+                    # 然后在列表页上空等触发重校。
                     self._goto(WAIT_DETAIL, u"已点商品，等待详情页…")
                     return
-                self._tick_stall(dt)
                 self.status = u"点击目标商品失败，重试…"
                 return
-            # 判定在列表但未取到中心，下轮重试
-            self._tick_stall(dt)
+            # 判定在列表但未取到中心，下轮重试（加载中不重校）
             self.status = u"列表确认中…"
             return
 
@@ -1118,7 +1116,6 @@ class FlowCore(object):
         self._heartbeat_log(
             dt, u"等待 i茅台加载可识别页面（首页/i购/列表/详情）…"
         )
-        self._tick_stall(dt)
         self.status = u"等待 i茅台页面加载…"
 
 
@@ -1146,15 +1143,13 @@ class FlowCore(object):
             if self._click_product():
                 self._goto(WAIT_DETAIL, u"已点商品，等待详情页…")
                 return
-            self._tick_stall(dt)
             self.status = u"点击目标商品失败，重试…"
             return
 
-        # 未确认在列表：可能弹窗未消失或停在详情页，无限等待
+        # 未确认在列表：可能弹窗未消失或停在详情页，动态等待（不重校）
         self._heartbeat_log(
             dt, u"未确认在商品列表（弹窗/详情页），继续等待…"
         )
-        self._tick_stall(dt)
         self.status = u"等待商品列表页…"
 
     # ---------------- SELECT_YEAR ----------------
@@ -1240,7 +1235,6 @@ class FlowCore(object):
             dt,
             u"等待详情页年份规格区域渲染（年份「%s」）…" % year,
         )
-        self._tick_stall(dt)
         self.status = u"等待详情页年份规格区域…"
 
     # ---------------- SELECT_QTY ----------------
@@ -1366,7 +1360,6 @@ class FlowCore(object):
         self._heartbeat_log(
             dt, u"等待详情页数量区域渲染…"
         )
-        self._tick_stall(dt)
         self.status = u"等待详情页数量区域…"
 
     # ---------------- READ_DETAIL ----------------
@@ -1485,7 +1478,6 @@ class FlowCore(object):
             dt,
             u"详情页等待按钮刷新/弹窗消失（不做任何点击）…",
         )
-        self._tick_stall(dt)
         self.status = u"详情页等待按钮刷新…"
 
     # ---------------- RAPID_BUY ----------------
@@ -1730,8 +1722,8 @@ class FlowCore(object):
             self._detail_backs = 0
 
         if page == u"unknown":
-            # 认不出页面（登录页/开屏广告/加载中）：限频拉起，避免
-            # 每个拍都 startActivity；长时间认不出由停滞计数触发重校。
+            # 认不出页面（登录页/开屏广告/加载中）：限频拉起，
+            # 每 1.5 秒最多一次；加载中等同首轮行为，不触发重校。
             last = self._last_launch_at
             if last is None or (now - last).total_seconds() >= 1.5:
                 self._last_launch_at = now
@@ -1739,7 +1731,6 @@ class FlowCore(object):
                 if callable(self.on_launch_app):
                     self.on_launch_app()
             self.status = u"整点已到，等待 i茅台 页面…"
-            self._tick_stall(dt)
             return
 
         if page == u"detail":
@@ -1761,9 +1752,8 @@ class FlowCore(object):
         if page == u"list":
             center = self._list_ready()
             if center is None:
-                # 列表未确认，下轮重试，不盲目点击
+                # 列表未确认，下轮重试，不盲目点击（不重校）
                 self.status = u"整点列表确认中…"
-                self._tick_stall(dt)
                 return
             self.recorded_pos = center
             # 目标商品优先（档案卡位+全称），失败再按坐标兜底

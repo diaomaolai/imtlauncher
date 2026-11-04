@@ -433,17 +433,16 @@ class TestProfileDrivenFlow(unittest.TestCase):
 
 class TestStallRecalibration(unittest.TestCase):
 
-    def test_nav_stall_sets_recal_flag(self):
+    def test_nav_loading_does_not_set_recal_flag(self):
+        """多轮次口径：NAV 加载中（页面认不出）动态等待，不触发重校"""
         bridge = FlowMockBridge()
         flow = FlowCore(bridge)
         flow.reset(datetime.now())
         flow._goto(NAVIGATE_IGOU, u"导航中…")
-        # 每 1 秒计一次，连续 STALL_RECAL_AFTER 次才重校
-        need_seconds = RUNTIME_STALL_RECAL_SECONDS * STALL_RECAL_AFTER
-        ticks = int(need_seconds / 0.3) + 4
-        for _ in range(ticks):
+        for _ in range(80):
             flow.update(0.3, datetime.now())
-        self.assertTrue(flow.needs_recalibration)
+        self.assertFalse(flow.needs_recalibration)
+        self.assertEqual(flow.state, NAVIGATE_IGOU)
 
     def test_stall_counter_resets_on_goto(self):
         flow = FlowCore(FlowMockBridge())

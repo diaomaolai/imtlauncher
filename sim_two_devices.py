@@ -8,7 +8,7 @@
 2. 再次武装：FlowCore 加载档案，在档案 bounds 矩形内实时识别点击，
    跑通 导航→年份→数量2→6→立即抢购→弹窗成功→售罄复核→退出；
 3. 华为 bounds 与 OPPO legacy px 不同，证明档案按机型独立生效；
-4. 无档案时退回 legacy 固定 px；节点持续对不上 60 秒触发重校。
+4. 无档案时退回 legacy 固定 px；节点加载中动态等待（不再重校）。
 
 运行：
     D:\\python\\python.exe sim_two_devices.py
@@ -440,14 +440,13 @@ def main():
             u"igou_tab", IGOU_TAB_REGION_PX
         ) == IGOU_TAB_REGION_PX
 
-        # ---------- 停滞 60 秒重校 ----------
+        # ---------- 停滞等待不重校（多轮次口径：加载中等同首轮）----------
         empty = EmptyBridge(HUAWEI_GEO, 1200, 2652)
         stall_flow = FlowCore(empty)
         stall_flow._goto(NAVIGATE_IGOU, u"导航中…")
-        ticks = int(RUNTIME_STALL_RECAL_SECONDS * STALL_RECAL_AFTER / 0.3) + 4
-        for _ in range(ticks):
+        for _ in range(80):
             stall_flow.update(0.3, datetime.now())
-        assert stall_flow.needs_recalibration
+        assert not stall_flow.needs_recalibration
 
         # ---------- 输出两份日志 ----------
         here = os.path.dirname(os.path.abspath(__file__))
@@ -482,7 +481,7 @@ def main():
             print(u"已输出：%s" % out_path)
 
         print(u"全部断言通过：校准建档 / 档案驱动 / 验证弹窗停手 / "
-              u"订单页上报 / legacy 兜底 / 停滞重校")
+              u"订单页上报 / legacy 兜底 / 停滞等待不重校")
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
