@@ -25,7 +25,10 @@ from flow_core import (
     RAPID_BUY,
     ENTER_PRODUCT,
 )
-from config import QTY_REGEX, QTY_TARGET, QTY_PLUS_CENTER_PX
+from config import (
+    QTY_REGEX, QTY_TARGET, QTY_PLUS_CENTER_PX,
+    YEAR_CHOICES, DETAIL_DEFAULT_YEAR,
+)
 
 YEAR = u"2026"
 BUY = u"立即抢购"
@@ -42,6 +45,7 @@ class DetailBridge(object):
         self.buy_clicks = 0
         self.back_count = 0
         self.plus_taps = 0
+        self.year_clicks = 0
         self.page = u"detail"
 
     def is_connected(self):
@@ -62,13 +66,15 @@ class DetailBridge(object):
         return any(self.text_exists(t) for t in texts)
 
     def text_exists_in_px_region(self, text, region):
-        if text == YEAR and self.spec_ready:
+        if text in YEAR_CHOICES and self.spec_ready:
             return True
         if text in (u"立即抢购", u"立即购买") and self.button_ready_flag:
             return True
         return False
 
     def click_text_in_px_region(self, text, region):
+        if text in YEAR_CHOICES:
+            self.year_clicks += 1
         return self.text_exists_in_px_region(text, region)
 
     def find_regex_in_px_region(self, regex, region):
@@ -112,6 +118,8 @@ class AutoReenterTest(unittest.TestCase):
             type("L", (), {"log": lambda s, m: self.logs.append(m)})(),
         )
         self.flow.reset(datetime(2026, 11, 2, 9, 0, 0))
+        # 明确选非默认年份（2026），保证流程走"点击年份格"分支
+        self.flow.year_target = u"2026"
         self.now = datetime(2026, 11, 2, 9, 0, 0)
 
     def tearDown(self):
@@ -120,6 +128,26 @@ class AutoReenterTest(unittest.TestCase):
 
     def _goto_year(self):
         self.flow._goto(SELECT_YEAR, u"进入详情…")
+
+    def test_default_year_skips_year_click(self):
+        """UI 选 2024（详情页默认已选）→ 不点年份，直接进数量"""
+        self.flow.year_target = u"2024"
+        self.bridge.spec_ready = True
+        self._goto_year()
+        self.flow.update(0.02, self.now)
+        self.assertEqual(self.flow.state, SELECT_QTY)
+        self.assertEqual(self.bridge.year_clicks, 0)
+
+    def test_every_non_default_year_clicks_its_cell(self):
+        """UI 选 2026/2023/2022/2021/2020/2019 → 逐个都点对应年份格"""
+        for year in (u"2026", u"2023", u"2022", u"2021", u"2020", u"2019"):
+            self.flow.year_target = year
+            self.bridge.spec_ready = True
+            self.bridge.year_clicks = 0
+            self._goto_year()
+            self.flow.update(0.02, self.now)
+            self.assertEqual(self.flow.state, SELECT_QTY, year)
+            self.assertEqual(self.bridge.year_clicks, 1, year)
 
     def test_grace_waits_for_qty_and_changes_to_six(self):
         """按钮先渲染、规格延迟：宽限内不跳过，最终改 6 瓶。"""

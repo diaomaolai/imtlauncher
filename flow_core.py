@@ -49,6 +49,7 @@
 全程通过 AppLogger 打印并写入 txt 日志。
 """
 
+import threading
 import time
 from datetime import timedelta
 
@@ -94,6 +95,7 @@ from config import (
     JINGDIAN_TAB_TEXT,
     JINGDIAN_TAB_REGION_PX,
     YEAR_TARGET_TEXT,
+    DETAIL_DEFAULT_YEAR,
     YEAR_CELL_REGION_PX,
     QTY_TARGET,
     QTY_VALUE_REGION_PX,
@@ -103,6 +105,9 @@ from config import (
     RUNTIME_STALL_RECAL_SECONDS,
     STALL_RECAL_AFTER,
     FREEZE_JUMP_SECONDS,
+    FREEZE_JUMP_TRIGGERS_RECAL,
+    IGNORED_FOREGROUND_PACKAGES,
+    NAV_CLICK_COOLDOWN_SECONDS,
     MANUAL_LAUNCH_LEAD_SECONDS,
 )
 
@@ -188,6 +193,7 @@ class FlowCore(object):
         # 按钮取色缓存：颜色状态（buy/gray/None）+ 采样时刻
         self._color_cache = None
         self._color_cache_at = 0.0
+        self._color_pending = False
         self._color_state_last = None
         # 灰色按钮已持续秒数（超过阈值退回列表重新进入）
         self._gray_elapsed = 0.0
@@ -199,6 +205,8 @@ class FlowCore(object):
         self._pkg_cache = None
         self._pkg_cache_at = 0.0
         self._last_launch_at = None
+        # NAV 点击冷却：上一次点 i购/经典 的时刻
+        self._nav_click_at = None
         # 当前状态已持续秒数（3 秒无进展触发本地恢复）
         self._state_elapsed = 0.0
 
@@ -317,36 +325,43 @@ class FlowCore(object):
 
     def _sample_button_rgb(self):
         """
-        按缓存取按钮填充色，返回 (r, g, b)；取不到返回 None。
-        只在"按钮文字是立即购买"时调用；底层截图最多等 800ms，
-        超时返回 None，调用方按文字判断（宁可点，不要卡）。
+        非阻塞取色（H4）：缓存命中直接返回；缓存过期则起后台线程采样，
+        本拍返回 None——第一击按文字立即点，不被截图拖慢。
+        截图只发生在后台线程里，最多等 800ms。
         """
         now = time.monotonic()
         if self._color_cache_at \
                 and now - self._color_cache_at < BUTTON_COLOR_CACHE_SECONDS:
             return self._color_cache
-        sampler = getattr(self.bridge, "average_color_in_px_region", None)
-        if not callable(sampler):
-            return None
-        region = self._button_sample_region()
-        if region is None:
-            return None
-        try:
-            rgb = sampler(region)
-        except Exception:
-            rgb = None
-        self._color_cache_at = now
-        self._color_cache = rgb
-        return rgb
+        if not self._color_pending:
+            self._color_pending = True
+            threading.Thread(
+                target=self._sample_button_rgb_bg, daemon=True
+            ).start()
+        return None
 
-    def _button_color_state(self):
+    def _sample_button_rgb_bg(self):
+        """后台取色线程：采样完写入缓存，不阻塞点击路径。"""
+        try:
+            sampler = getattr(
+                self.bridge, "average_color_in_px_region", None
+            )
+            region = self._button_sample_region()
+            if callable(sampler) and region is not None:
+                self._color_cache = sampler(region)
+                self._color_cache_at = time.monotonic()
+        except Exception:
+            pass
+        finally:
+            self._color_pending = False
+
+    @staticmethod
+    def _classify_button_color(rgb):
         """
         按钮填充色 → buy / gray / None（未知）。
         灰：已售罄 / xx:xx投放 / xx:xx备货中 —— 不可点；
-        黄橙：立即抢购 —— 可点；
-        未知（旧 APK、截图失败、颜色不典型）→ 调用方退回纯文字判断。
+        黄橙：立即抢购 —— 可点。
         """
-        rgb = self._sample_button_rgb()
         if rgb is None:
             return None
         red, green, blue = rgb
@@ -354,45 +369,61 @@ class FlowCore(object):
                 and green >= BUTTON_COLOR_BUY_G_MIN \
                 and blue <= BUTTON_COLOR_BUY_B_MAX \
                 and (red - blue) >= BUTTON_COLOR_BUY_RB_MIN:
-            state = u"buy"
-        elif max(rgb) - min(rgb) <= BUTTON_COLOR_GRAY_SPREAD_MAX \
+            return u"buy"
+        if max(rgb) - min(rgb) <= BUTTON_COLOR_GRAY_SPREAD_MAX \
                 and BUTTON_COLOR_GRAY_MIN <= red <= BUTTON_COLOR_GRAY_MAX:
-            state = u"gray"
-        else:
-            state = None
+            return u"gray"
+        return None
+
+    def _button_color_state(self):
+        """
+        按钮颜色状态（buy/gray/None）；取色是异步的，
+        本拍没有缓存时返回 None，调用方按文字立即点击。
+        """
+        rgb = self._sample_button_rgb()
+        state = self._classify_button_color(rgb)
         if state != self._color_state_last:
             self._color_state_last = state
-            self._log(
-                u"按钮取色 RGB=(%d,%d,%d) → %s"
-                % (red, green, blue,
-                   {u"buy": u"黄/橙，可点",
-                    u"gray": u"灰，不可点",
-                    None: u"未知，按文字判断"}[state])
-            )
+            if rgb is not None:
+                self._log(
+                    u"按钮取色 RGB=(%d,%d,%d) → %s"
+                    % (rgb[0], rgb[1], rgb[2],
+                       {u"buy": u"黄/橙，可点",
+                        u"gray": u"灰，不可点",
+                        None: u"未知，按文字判断"}[state])
+                )
         return state
 
     def _tick_stall(self, dt):
         """
         停滞计数：每 RUNTIME_STALL_RECAL_SECONDS（1 秒）判定一次；
-        连续 STALL_RECAL_AFTER 次（3 次）没推进才请求重校。
+        连续 STALL_RECAL_AFTER 次没推进才请求重校。
 
         dt 超过 FREEZE_JUMP_SECONDS（如冻结后跳 60 秒）按跳时处理：
-        折算次数封顶为 STALL_RECAL_AFTER（即 int 结果 = 3），
-        记一次重校，而不是记 60 次、也不是完全忽略。
+        默认（FREEZE_JUMP_TRIGGERS_RECAL=False）只记日志并清零计数，
+        不触发重校——冻结是系统行为，不是节点对不上，重校只会雪上加霜。
         """
         if dt > FREEZE_JUMP_SECONDS:
-            jumps = int(dt / RUNTIME_STALL_RECAL_SECONDS)
-            jumps = min(max(1, jumps), STALL_RECAL_AFTER)
-            self._stall_count += jumps
-            self._stall_seconds = 0.0
-            self._log(
-                u"检测到 %.1f 秒跳时，按 %d 次停滞计" % (dt, jumps)
-            )
-            if self._stall_count >= STALL_RECAL_AFTER:
-                self.needs_recalibration = True
+            if FREEZE_JUMP_TRIGGERS_RECAL:
+                jumps = int(dt / RUNTIME_STALL_RECAL_SECONDS)
+                jumps = min(max(1, jumps), STALL_RECAL_AFTER)
+                self._stall_count += jumps
                 self._log(
-                    u"跳时后立即重新校准（累计 %d 次）"
-                    % self._stall_count
+                    u"检测到 %.1f 秒跳时，按 %d 次停滞计"
+                    % (dt, jumps)
+                )
+                if self._stall_count >= STALL_RECAL_AFTER:
+                    self.needs_recalibration = True
+                    self._log(
+                        u"跳时后立即重新校准（累计 %d 次）"
+                        % self._stall_count
+                    )
+            else:
+                self._stall_seconds = 0.0
+                self._stall_count = 0
+                self._log(
+                    u"检测到 %.1f 秒跳时（疑似冻结），"
+                    u"不计入停滞，恢复后重新判定" % dt
                 )
             return
         self._stall_seconds += dt
@@ -445,12 +476,18 @@ class FlowCore(object):
         """
         当前在手机桌面（如误触 Home）或其它 APP 时，把 i茅台 拉回前台。
 
-        比在桌面图标节点里误找 i购/经典 可靠；1.5 秒内只拉一次，
-        避免冷启动期间反复 startActivity。取不到包名（旧 APK）返回
-        False，交回原文字判断。
+        防误判（H1）：
+        - 白名单包名（自己的进程/systemui/android）一律视为还在 i茅台；
+        - RAPID 已点中过按钮（点击落在 i茅台）时不再拉回，防止把
+          购买中的页面切走。
+        1.5 秒内只拉一次；取不到包名（旧 APK）返回 False，交回文字判断。
         """
         package = self._foreground_package()
         if not package or package == MOUTAI_PACKAGE:
+            return False
+        if package in IGNORED_FOREGROUND_PACKAGES:
+            return False
+        if self.state == RAPID_BUY and self._rapid_click_count > 0:
             return False
         last = self._last_launch_at
         if last is not None and (now - last).total_seconds() < 1.5:
@@ -511,6 +548,7 @@ class FlowCore(object):
         self._reenter_next_at = None
         self._color_cache = None
         self._color_cache_at = 0.0
+        self._color_pending = False
         self._color_state_last = None
         self._gray_elapsed = 0.0
         self._verify_total = 0.0
@@ -518,6 +556,7 @@ class FlowCore(object):
         self._pkg_cache = None
         self._pkg_cache_at = 0.0
         self._last_launch_at = None
+        self._nav_click_at = None
         self._state_elapsed = 0.0
         self._log(
             u"已设置定时，开售时刻 %s，计划拉起时刻 %s"
@@ -546,7 +585,16 @@ class FlowCore(object):
 
     # ---------------- 主循环 ----------------
     def update(self, dt, now):
-        """推进状态机一帧。"""
+        """
+        推进状态机一帧。
+
+        计时体系（L1 说明，按"谁先到谁先动"分层）：
+        1. _state_elapsed（3 秒）→ _stuck_recover 本地恢复（back/回 NAV）；
+        2. _entry_ticks（150 拍 ≈ 3 秒）→ YEAR/QTY 宽限跳过；
+        3. _stall_seconds/_stall_count（1 秒 × STALL_RECAL_AFTER 次）
+           → 最后兜底：重新校准。
+        三层互不重置对方的计数，跳时（dt>2s）只清零停滞计数。
+        """
         self._state_elapsed += dt
         # 手机桌面/其他 APP（如误触 Home、切到微信）→ 先把 i茅台 拉回前台。
         # 用前台包名判断，比在桌面图标里找 i购/经典 可靠；
@@ -1008,6 +1056,14 @@ class FlowCore(object):
             return
 
         if page == u"igou":
+            # 点击冷却（M3）：0.3 秒内不重复点同一个 tab，
+            # 防止页面过渡慢时 2~3 次/秒连点
+            if self._nav_click_at is not None and (
+                    now - self._nav_click_at).total_seconds() \
+                    < NAV_CLICK_COOLDOWN_SECONDS:
+                self.status = u"已点击经典，等待商品列表…"
+                return
+            self._nav_click_at = now
             jd_region = self._region(
                 u"jingdian_tab", JINGDIAN_TAB_REGION_PX
             )
@@ -1027,6 +1083,13 @@ class FlowCore(object):
             return
 
         if page == u"home":
+            # 点击冷却（M3）：同上
+            if self._nav_click_at is not None and (
+                    now - self._nav_click_at).total_seconds() \
+                    < NAV_CLICK_COOLDOWN_SECONDS:
+                self.status = u"已点击 i购，等待页面加载…"
+                return
+            self._nav_click_at = now
             igou_region = self._region(
                 u"igou_tab", IGOU_TAB_REGION_PX
             )
@@ -1121,6 +1184,14 @@ class FlowCore(object):
             return
 
         year = self.year_target or YEAR_TARGET_TEXT
+        # 详情页每次进入默认已选 DETAIL_DEFAULT_YEAR（实拍 2024）：
+        # UI 选的也是它就不点年份，直接进数量；选其它年份才点对应格。
+        if year == DETAIL_DEFAULT_YEAR:
+            self._log(
+                u"详情页默认已是 %s，无需点击年份" % year
+            )
+            self._goto(SELECT_QTY, u"年份默认%s，修改数量…" % year)
+            return
         # UI 选了未知年份时退回默认年份的识别框；
         # 档案年份格 bounds 优先，无档案退回固定 px
         legacy_region = YEAR_CELL_REGION_PX.get(
@@ -1364,11 +1435,8 @@ class FlowCore(object):
 
         # 2) 已售罄：需二次确认——先返回列表重新进入，
         #    再次读到的按钮仍为售罄才结束（防 H5 缓存旧状态误判）
-        sold_out = False
-        for text in SOLD_OUT_TEXTS:
-            if self.bridge.text_exists(text):
-                sold_out = True
-                break
+        #    合并一次遍历（L2），不在每个文案上各扫一遍全树
+        sold_out = self._any_text(SOLD_OUT_TEXTS)
         if sold_out:
             if self._soldout_pending:
                 self._log(
@@ -1456,18 +1524,17 @@ class FlowCore(object):
         clicked = hit is not None
 
         # 3b) 售罄检查：点不中时必查（按钮文字消失）；点位正常时
-        #     每 5 次点击才查一次，省掉大部分全树遍历。
+        #     每 5 次点击才查一次，且合并一次遍历（L2）。
         if not clicked or self._rapid_click_count % 5 == 0:
-            for text in SOLD_OUT_TEXTS:
-                if self.bridge.text_exists(text):
-                    self._soldout_pending = True
-                    self._log(
-                        u"识别到「已售罄」，停止连点，"
-                        u"返回列表并重新进入复核"
-                    )
-                    self.bridge.back()
-                    self._goto(ENTER_PRODUCT, u"售罄复核，重新进入确认…")
-                    return
+            if self._any_text(SOLD_OUT_TEXTS):
+                self._soldout_pending = True
+                self._log(
+                    u"识别到「已售罄」，停止连点，"
+                    u"返回列表并重新进入复核"
+                )
+                self.bridge.back()
+                self._goto(ENTER_PRODUCT, u"售罄复核，重新进入确认…")
+                return
 
         if clicked:
             self._rapid_click_count += 1

@@ -11,6 +11,7 @@
     D:\\python\\python.exe test_button_color.py
 """
 
+import time
 import unittest
 from datetime import datetime
 
@@ -99,10 +100,20 @@ def make_flow(bridge, now):
 
 class ButtonColorTest(unittest.TestCase):
 
-    def test_gray_button_wait_not_click(self):
-        """灰色 + 立即抢购（禁用态）：不能点"""
+    def test_gray_button_first_tick_clicks_by_text(self):
+        """异步取色（H4）：第一拍颜色还没采到 → 按文字点一次，不卡"""
         bridge = ColorBridge(rgb=GRAY, button=BUY)
         flow = make_flow(bridge, datetime(2026, 11, 2, 9, 0, 0))
+        flow.update(0.05, datetime(2026, 11, 2, 9, 0, 0))
+        self.assertEqual(bridge.clicks, 1)
+        self.assertEqual(flow.state, RAPID_BUY)
+
+    def test_gray_button_cached_color_blocks(self):
+        """缓存里已是灰色时：READ 不点，等待变黄"""
+        bridge = ColorBridge(rgb=GRAY, button=BUY)
+        flow = make_flow(bridge, datetime(2026, 11, 2, 9, 0, 0))
+        flow._color_cache = GRAY
+        flow._color_cache_at = time.monotonic()
         flow.update(0.05, datetime(2026, 11, 2, 9, 0, 0))
         self.assertEqual(bridge.clicks, 0)
         self.assertEqual(flow.state, READ_DETAIL)
@@ -156,12 +167,16 @@ class ButtonColorTest(unittest.TestCase):
 
     def test_color_classification(self):
         """取色分类：灰 / 黄橙 / 未知"""
-        gray = FlowCore(ColorBridge(rgb=(150, 152, 149)))
-        self.assertEqual(gray._button_color_state(), u"gray")
-        yellow = FlowCore(ColorBridge(rgb=(245, 170, 60)))
-        self.assertEqual(yellow._button_color_state(), u"buy")
-        white = FlowCore(ColorBridge(rgb=(250, 248, 246)))
-        self.assertIsNone(white._button_color_state())
+        self.assertEqual(
+            FlowCore._classify_button_color((150, 152, 149)), u"gray"
+        )
+        self.assertEqual(
+            FlowCore._classify_button_color((245, 170, 60)), u"buy"
+        )
+        self.assertIsNone(
+            FlowCore._classify_button_color((250, 248, 246))
+        )
+        self.assertIsNone(FlowCore._classify_button_color(None))
 
 
 if __name__ == "__main__":

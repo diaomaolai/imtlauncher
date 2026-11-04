@@ -13,7 +13,7 @@
 """
 
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flow_core import FlowCore, NAVIGATE_IGOU, READ_DETAIL
 
@@ -129,7 +129,7 @@ class TabRecoveryTest(unittest.TestCase):
         self.assertEqual(flow.state, NAVIGATE_IGOU)
 
     def test_nav_clicks_igou_then_jingdian(self):
-        """NAV：首页点 i购，i购页点 经典"""
+        """NAV：首页点 i购，i购页点 经典（点击有 0.3 秒冷却）"""
         bridge = TabBridge()
         flow = FlowCore(bridge)
         flow.reset(datetime(2026, 11, 3, 9, 0, 0))
@@ -138,7 +138,7 @@ class TabRecoveryTest(unittest.TestCase):
         flow.update(0.3, now)
         self.assertEqual(bridge.page, u"igou")
         self.assertIn(u"i购", bridge.clicks)
-        flow.update(0.3, now)
+        flow.update(0.3, now + timedelta(seconds=0.4))
         self.assertEqual(bridge.page, u"list")
         self.assertIn(u"经典", bridge.clicks)
 

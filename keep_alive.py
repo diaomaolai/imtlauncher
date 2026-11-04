@@ -9,6 +9,10 @@
 
 SERVICE_CLASS = u"org.personal.imtlauncher.KeepAliveService"
 
+# 本进程是否已启动过保活服务：stop 只在启动过时才真正停止并打日志，
+# 防止"未武装时每 0.2 秒调一次 stop"把日志刷屏。
+_active = False
+
 
 def _emit(logger, line):
     """输出一行日志。"""
@@ -35,6 +39,7 @@ def _intent():
 
 def start(logger=None):
     """启动前台保活服务；失败不影响主流程"""
+    global _active
     try:
         from jnius import autoclass  # noqa: F401
     except Exception:
@@ -48,6 +53,7 @@ def start(logger=None):
             activity.startForegroundService(intent)
         else:
             activity.startService(intent)
+        _active = True
         _emit(logger, u"[keepalive] 前台保活服务已启动")
         return True
     except Exception as exc:
@@ -56,7 +62,10 @@ def start(logger=None):
 
 
 def stop(logger=None):
-    """停止前台保活服务"""
+    """停止前台保活服务（未启动过则静默返回）"""
+    global _active
+    if not _active:
+        return False
     try:
         from jnius import autoclass  # noqa: F401
     except Exception:
@@ -66,6 +75,7 @@ def stop(logger=None):
         if activity is None:
             return False
         activity.stopService(intent)
+        _active = False
         _emit(logger, u"[keepalive] 前台保活服务已停止")
         return True
     except Exception as exc:

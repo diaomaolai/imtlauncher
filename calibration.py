@@ -33,7 +33,7 @@ from config import (
     CALIBRATION_MAX_CLICK_RETRIES,
     CALIBRATION_SHOT_DIR_NAME,
 )
-from android_launcher import launch_moutai
+from android_launcher import launch_moutai, MOUTAI_PACKAGE
 from device_profile import DeviceProfile
 
 
@@ -190,6 +190,7 @@ class DeviceCalibrator(object):
             timeout = CALIBRATION_STAGE_TIMEOUT
         deadline = time.monotonic() + timeout
         last_probe = 0.0
+        last_launch = 0.0
         while time.monotonic() < deadline:
             if self._stopped():
                 return False
@@ -199,6 +200,23 @@ class DeviceCalibrator(object):
             except Exception:
                 pass
             now = time.monotonic()
+            # 前台不是 i茅台（用户误触 Home/切走）→ 每 5 秒拉回一次（M4），
+            # 校准不因为被切走而失败，也不至于过于频繁打断用户
+            if now - last_launch >= 5.0:
+                getter = getattr(self.bridge, "current_package", None)
+                package = None
+                if callable(getter):
+                    try:
+                        package = getter()
+                    except Exception:
+                        package = None
+                if package and package != MOUTAI_PACKAGE:
+                    last_launch = now
+                    self._log(
+                        u"等待%s… 前台是 %s，重新拉起 i茅台"
+                        % (what, package)
+                    )
+                    launch_moutai(self.logger)
             if now - last_probe >= 2.0:
                 last_probe = now
                 self._log(u"等待%s… i购=%s 经典=%s 全部=%s 数量=%s"
@@ -423,7 +441,11 @@ class DeviceCalibrator(object):
         return bounds[1] - 20, bounds[3] + 20
 
     def _qty_records_by_band(self, tree, label):
-        """按「数量」行带找减号/加号（层级不同时的兜底）。"""
+        """
+        按「数量」行带找减号/加号（层级不同时的兜底）。
+        M1 防错：只收"可点击（ck）或 Button/ImageView 类"的无文字节点，
+        避免把行带里的无文字容器当成加减号。
+        """
         band = self._label_band(tree, label)
         label_right = tree.bounds(label)[2]
         buttons = []
@@ -436,6 +458,11 @@ class DeviceCalibrator(object):
             if bounds[2] <= label_right:
                 continue
             if (node.get(u"t") or node.get(u"d") or u"").strip():
+                continue
+            class_name = node.get(u"c", u"")
+            if not (node.get(u"ck")
+                    or u"Button" in class_name
+                    or u"ImageView" in class_name):
                 continue
             buttons.append(node)
         if len(buttons) < 2:
@@ -492,11 +519,15 @@ class DeviceCalibrator(object):
         return None
 
     def _button_record(self, tree):
-        """记录按钮节点区域。"""
+        """
+        记录按钮节点区域（M2）：优先记按钮的**可点击容器**（面积不超过
+        屏幕 20%），颜色取样和点击都更稳；找不到才记文字节点本体。
+        """
         node = self._button_node(tree)
         if node is None:
             return {}
-        return self._record(tree, node)
+        target = tree.clickable_ancestor(node, max_area_ratio=0.2) or node
+        return self._record(tree, target)
 
     def _button_state_text(self, tree):
         """当前按钮处于哪种状态：投放时间 / 立即抢购 / 已售罄"""
@@ -530,7 +561,8 @@ class DeviceCalibrator(object):
         self._log(u"首次武装，开始自动校准设备（不抢购）")
         launch_moutai(self.logger)
 
-        # 0) 等开屏广告结束：先按 10 秒等，没等到再按阶段超时继续等
+        # 0) 等开屏广告结束：先按 10 秒等，没等到再按阶段超时继续等。
+        #    等待期间若被误触 Home/切走，会自动重新拉起 i茅台。
         ready = lambda: (
             self._is_home() or self._is_igou() or self._is_detail()
         )

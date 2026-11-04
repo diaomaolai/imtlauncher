@@ -35,7 +35,9 @@ from flow_core import (
     WAIT_TIME,
     WAIT_VERIFY,
 )
-from scheduler import parse_target_time, format_remaining, next_slot
+from scheduler import (
+    parse_target_time, format_remaining, next_slot, next_two_minute_mark
+)
 from app_logger import AppLogger
 from app_ui import MainScreen
 from status_reporter import StatusStore
@@ -195,6 +197,7 @@ class IMtAssistantApp(App):
         self.profile_store = ProfileStore(logger=self.app_logger)
         self.calibration_worker = None
         self.calibration_stop = None
+        self._pending_after_fn = None
         self.card_store = CardStore()
         self.card_unlocked = False
 
@@ -202,6 +205,7 @@ class IMtAssistantApp(App):
         self.screen = MainScreen()
         self.screen.login_btn.bind(on_press=self._on_login_pressed)
         self.screen.schedule_btn.bind(on_press=self._on_schedule_pressed)
+        self.screen.set_time_btn.bind(on_press=self._on_set_time_pressed)
 
         # 回填上次登录成功的卡密，大退重启后无需重新输入
         saved_card = self.card_store.get()
@@ -258,13 +262,18 @@ class IMtAssistantApp(App):
             return
 
         self._ui(lambda: self.screen.set_status(
-            u"首次运行，设备校准中（不抢购）…"))
+            u"首次运行：正在校准设备（会拉起 i茅台，请勿操作，约 1 分钟）…"))
         self._ui(lambda: setattr(
             self.screen.schedule_btn, u"disabled", True))
-        # 正在校准时不重复启动第二个校准线程（否则两条导航链互相抢屏）
+        # 正在校准时不重复启动第二个校准线程（否则两条导航链互相抢屏）。
+        # L4：把新的武装请求暂存，校准成功后用"最新请求"武装，
+        # 场次自启动撞上首次校准时不会丢场次。
         if self.calibration_worker is not None \
                 and self.calibration_worker.is_alive():
-            self.app_logger.log(u"设备校准已在进行中，忽略重复校准请求")
+            self._pending_after_fn = after_fn
+            self.app_logger.log(
+                u"设备校准进行中，暂存最新武装请求，完成后自动武装"
+            )
             return
         stop_event = threading.Event()
         self.calibration_stop = stop_event
@@ -278,13 +287,17 @@ class IMtAssistantApp(App):
             """校准结束回调（在工作线程执行）。"""
             if stop_event.is_set():
                 self.app_logger.log(u"校准已取消，忽略本次结果")
+                self._pending_after_fn = None
                 return
             if ok:
                 self.flow.profile = result
                 self._ui(lambda: self.screen.set_status(
                     u"设备校准完成，继续武装"))
                 self.app_logger.log(u"校准成功，继续武装流程")
-                after_fn()
+                # 校准期间若又收到武装请求（如场次自启动），用最新的
+                latest = self._pending_after_fn or after_fn
+                self._pending_after_fn = None
+                latest()
                 return
 
             def fail_ui():
@@ -293,6 +306,8 @@ class IMtAssistantApp(App):
                 self.screen.schedule_btn.disabled = False
                 self.screen.set_status(u"设备校准失败：%s" % result)
 
+            # 校准失败：清掉暂存的武装请求，避免旧请求残留到下次校准成功
+            self._pending_after_fn = None
             self._ui(fail_ui)
             self.app_logger.log(u"设备校准失败：%s" % result)
 
@@ -463,6 +478,20 @@ class IMtAssistantApp(App):
         """手动定时武装（卡密校验通过后，工作线程调用）"""
         self._arm_flow(target, target.strftime(u"%H:%M:%S"))
 
+    def _on_set_time_pressed(self, instance):
+        """
+        自动设置时间：取当前时间（毫秒级），计算下一个两分钟整点填入，
+        不再手动填写时间。例：14:04:05 → 14:06:00。
+        """
+        target = next_two_minute_mark(datetime.now())
+        text = target.strftime(u"%H:%M:%S")
+        self.screen.set_time_text(text)
+        self.screen.set_status(
+            u"已自动设置时间 %s（下一个两分钟整点），"
+            u"点「设置定时」开始" % text
+        )
+        self.app_logger.log(u"自动设置时间：%s" % text)
+
     def _on_schedule_pressed(self, instance):
         """设置定时 / 取消定时 按钮回调"""
         if self.flow_worker is not None and not self.flow.is_done:
@@ -582,13 +611,22 @@ class IMtAssistantApp(App):
         self.calibration_worker.start()
 
     def _disarm(self, status_text=None):
-        """取消定时并恢复界面"""
+        """
+        取消定时并恢复界面（幂等）。
+
+        实机教训：开机后 flow 初始状态是 DONE，_tick 每 0.2 秒调用
+        本函数，会 ①把正在进行的校准 stop_event 置位（校准被秒杀），
+        ②每秒刷 5 条 keep_alive 停止日志。因此未武装时直接返回。
+        """
+        if self.flow_worker is None and self.calibration_stop is None:
+            return
         if self.calibration_stop is not None:
             self.calibration_stop.set()
             self.calibration_stop = None
         if self.flow_worker is not None:
             self.flow_worker.stop()
             self.flow_worker = None
+        self._pending_after_fn = None
         keep_alive.stop(self.app_logger)
         self.screen.set_schedule_button_armed(False)
         self.screen.set_countdown(u"倒计时：未设定")
@@ -602,7 +640,12 @@ class IMtAssistantApp(App):
             # 不再杀进程：保留进程与监控守护线程盯后续场次，
             # 退出由用户手动操作。
             self.screen.set_status(self.flow.status)
-            self._disarm(self.flow.status)
+            # 校准进行中不 disarm（否则 stop_event 会把校准秒杀）；
+            # 流程真正跑完（worker 存在且已结束）才复位一次。
+            if self.calibration_worker is None \
+                    and self.calibration_stop is None \
+                    and self.flow_worker is not None:
+                self._disarm(self.flow.status)
             return
         if self.flow_worker is None:
             return

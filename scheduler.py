@@ -100,3 +100,27 @@ def next_slot(now=None):
     return min(candidates) if candidates else now + timedelta(minutes=5)
 
 
+def next_two_minute_mark(now=None):
+    """
+    计算"下一个两分钟整点"（分钟为偶数、秒和微秒为 0 的时刻）。
+    用于"点按钮自动设置时间"：不再手动填写。
+
+    例（实拍口径）：
+      14:04:05 → 14:06:00
+      14:04:00 → 14:06:00（整点当下也取下一个）
+      14:03:30 → 14:04:00
+      14:05:59 → 14:06:00
+      23:59:30 → 次日 00:00:00
+    """
+    now = now if now is not None else datetime.now()
+    minute = now.minute
+    if now.second > 0 or now.microsecond > 0:
+        minute += 1
+    minute += minute % 2  # 奇数分进到偶数分
+    target = now.replace(hour=now.hour, minute=0, second=0, microsecond=0) \
+        + timedelta(minutes=minute)
+    if target <= now:
+        target += timedelta(minutes=2)
+    return target
+
+

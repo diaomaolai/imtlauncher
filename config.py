@@ -11,7 +11,7 @@ import time
 
 # ---------------- 基础信息 ----------------
 APP_TITLE = u"i茅台助手"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 
 # 目标设备基准：OPPO PDSM00 1080x2400（下面所有绝对像素都按此实测）
 
@@ -210,15 +210,30 @@ CALIBRATION_MAX_CLICK_RETRIES = 2
 CALIBRATION_SHOT_DIR_NAME = u"calibration_shots"
 
 # 运行时停滞重校：每 1 秒判定一次"这一秒有没有推进"。
-# 连续 STALL_RECAL_AFTER 次（默认 3 次 ≈ 3 秒）都没推进，
-# 才判定节点对不上（页面改版/档案失效）并触发重新校准；
-# 不再等 60 秒。
+# 连续 STALL_RECAL_AFTER 次（5 次 ≈ 5 秒）都没推进，才判定
+# 节点对不上（页面改版/档案失效）并触发重新校准。
+# 3 秒内先由本地恢复（_stuck_recover）处理，重校是更靠后的兜底，
+# 避免冷启动/慢页面 >3 秒就被拉去重校。
 RUNTIME_STALL_RECAL_SECONDS = 1.0
-STALL_RECAL_AFTER = 3
-# 单拍 dt 超过该秒数视为"进程被冻结/挂起后的跳时"：
-# 折算次数封顶为 STALL_RECAL_AFTER（int 结果 = 3），
-# 即跳时只触发一次重校，而不是记 60 次。
+STALL_RECAL_AFTER = 5
+# 单拍 dt 超过该秒数视为"进程被冻结/挂起后的跳时"。
+# 跳时是否计入停滞并触发重校：默认 False——冻结是系统行为，
+# 不是节点对不上，重校（拉起+采集约 45 秒）只会雪上加霜。
 FREEZE_JUMP_SECONDS = 2.0
+FREEZE_JUMP_TRIGGERS_RECAL = False
+
+# 前台包名白名单例外：这些包名出现时"不视为离开了 i茅台"。
+# 部分 ROM 的 getWindows() 会把我们自己的进程/systemui/输入法
+# 当成第一个应用窗口，误判会导致反复拉起 i茅台。
+IGNORED_FOREGROUND_PACKAGES = (
+    u"org.personal.imtlauncher",
+    u"com.android.systemui",
+    u"android",
+)
+
+# NAV 点击冷却：点完 i购/经典 后 0.3 秒内不重复点击同一个 tab，
+# 防止页面过渡慢时 2~3 次/秒连点。
+NAV_CLICK_COOLDOWN_SECONDS = 0.3
 
 # ---------------- 启动后导航（i购 → 经典）----------------
 # 拉起 i茅台后先做区域限定识别点击：首页底部点「i购」→
@@ -254,8 +269,11 @@ IGOU_CATEGORY_TEXTS = (
 #   第3行 2019 中心(292,1782)
 # 下拉菜单选项（顺序即 UI 显示顺序）
 YEAR_CHOICES = (u"2026", u"2024", u"2023", u"2022", u"2021", u"2020", u"2019")
-# 未手动选择时的默认年份（当年发售的飞天带杯）
-YEAR_TARGET_TEXT = time.strftime(u"%Y")
+# 详情页每次进入默认已选中的年份（实拍确认是 2024）。
+# UI 下拉默认也选它：目标年份与详情页默认一致时无需点击年份格，
+# 直接进数量修改；选了其它年份才点击对应的年份格。
+DETAIL_DEFAULT_YEAR = u"2024"
+YEAR_TARGET_TEXT = DETAIL_DEFAULT_YEAR
 # 每个年份格对应的区域限定识别框（绝对像素，只框住该格，留少量边距）
 YEAR_CELL_REGION_PX = {
     u"2026": (150, 1490, 435, 1590),

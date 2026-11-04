@@ -456,13 +456,29 @@ class TestStallRecalibration(unittest.TestCase):
         self.assertEqual(flow._stall_count, 0)
         self.assertFalse(flow.needs_recalibration)
 
-    def test_freeze_jump_counts_as_three(self):
-        """冻结跳时（dt=60）按 3 次封顶计：立即重校，但不记 60 次"""
+    def test_freeze_jump_does_not_recal_by_default(self):
+        """冻结跳时（dt=60）默认不计入停滞、不触发重校（H2）"""
         flow = FlowCore(FlowMockBridge())
         flow._goto(NAVIGATE_IGOU, u"导航中…")
         flow._tick_stall(60.0)
-        self.assertTrue(flow.needs_recalibration)
-        self.assertEqual(flow._stall_count, 3)
+        self.assertFalse(flow.needs_recalibration)
+        self.assertEqual(flow._stall_count, 0)
+
+    def test_freeze_jump_can_trigger_when_enabled(self):
+        """打开 FREEZE_JUMP_TRIGGERS_RECAL 后：跳时按 STALL_RECAL_AFTER 次封顶计并重校"""
+        import flow_core
+        old = flow_core.FREEZE_JUMP_TRIGGERS_RECAL
+        flow_core.FREEZE_JUMP_TRIGGERS_RECAL = True
+        try:
+            flow = FlowCore(FlowMockBridge())
+            flow._goto(NAVIGATE_IGOU, u"导航中…")
+            flow._tick_stall(60.0)
+            self.assertTrue(flow.needs_recalibration)
+            self.assertEqual(
+                flow._stall_count, flow_core.STALL_RECAL_AFTER
+            )
+        finally:
+            flow_core.FREEZE_JUMP_TRIGGERS_RECAL = old
 
 
 if __name__ == u"__main__":

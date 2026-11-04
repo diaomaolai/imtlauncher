@@ -23,7 +23,6 @@ from kivy.uix.widget import Widget
 from config import (
     APP_TITLE,
     APP_VERSION,
-    DEFAULT_TIME_TEXT,
     YEAR_CHOICES,
     YEAR_TARGET_TEXT,
 )
@@ -221,7 +220,7 @@ class MainScreen(BoxLayout):
 
         # ---- 定时区域（登录前锁定）----
         self.time_caption = Label(
-            text=u"定时启动时间（HH:MM:SS）",
+            text=u"定时启动时间（点下方按钮自动设置）",
             font_size="14sp",
             color=(0.35, 0.35, 0.35, 1),
             size_hint=(1, 0.04),
@@ -229,18 +228,30 @@ class MainScreen(BoxLayout):
         self.add_widget(self.time_caption)
 
         self.time_input = TextInput(
-            text=DEFAULT_TIME_TEXT,
+            text=u"点下方按钮设置时间",
             font_size="20sp",
             halign="center",
             multiline=False,
             write_tab=False,
             input_filter=_time_input_filter,
+            readonly=True,          # 不再手动填写
             disabled=True,
             size_hint=(1, 0.07),
         )
         # max_length 构造后再设置（见 card_input 说明）
         self.time_input.max_length = 12
         self.add_widget(self.time_input)
+
+        # 自动设置时间：取当前时间（毫秒级），算下一个两分钟整点
+        self.set_time_btn = Button(
+            text=u"设置时间（下一个两分钟整点）",
+            font_size="16sp",
+            color=(0.2, 0.2, 0.2, 1),
+            background_color=(0.85, 0.85, 0.85, 1),
+            disabled=True,
+            size_hint=(1, 0.055),
+        )
+        self.add_widget(self.set_time_btn)
 
         self.schedule_btn = Button(
             text=u"设置定时（需先登录）",
@@ -305,6 +316,7 @@ class MainScreen(BoxLayout):
         """卡密登录成功后解锁定时区与到点自启动；失败保持锁定"""
         self.schedule_btn.disabled = not unlocked
         self.time_input.disabled = not unlocked
+        self.set_time_btn.disabled = not unlocked
         # 年份下拉：登录成功后显现并可点，未登录隐藏且禁用
         self.year_row.opacity = 1 if unlocked else 0
         self.year_row.disabled = not unlocked
@@ -322,6 +334,10 @@ class MainScreen(BoxLayout):
     def get_time_text(self):
         """获取时间输入框内容"""
         return self.time_input.text.strip()
+
+    def set_time_text(self, text):
+        """设置时间输入框内容（自动设置时间按钮用）"""
+        self.time_input.text = text
 
     def set_countdown(self, text):
         """更新倒计时文字"""
