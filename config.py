@@ -11,7 +11,7 @@ import time
 
 # ---------------- 基础信息 ----------------
 APP_TITLE = u"i茅台助手"
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.8.0"
 
 # 目标设备基准：OPPO PDSM00 1080x2400（下面所有绝对像素都按此实测）
 
@@ -221,6 +221,12 @@ STALL_RECAL_AFTER = 5
 # 不是节点对不上，重校（拉起+采集约 45 秒）只会雪上加霜。
 FREEZE_JUMP_SECONDS = 2.0
 FREEZE_JUMP_TRIGGERS_RECAL = False
+
+# 预热：开售前 90~45 秒之间先进一次详情页，把 H5 资源/按钮控件
+# 加载完（真机抓包显示整点前后 app 会拉取约 21MB 资源，正点到时
+# 才加载会拖慢第一击），随后 back 回列表等到点重进。每场只预热一次。
+PREHEAT_LEAD_SECONDS = 90.0
+PREHEAT_MIN_LEAD_SECONDS = 45.0
 
 # 前台包名白名单例外：这些包名出现时"不视为离开了 i茅台"。
 # 部分 ROM 的 getWindows() 会把我们自己的进程/systemui/输入法

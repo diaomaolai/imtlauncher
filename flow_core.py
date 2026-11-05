@@ -51,7 +51,7 @@
 
 import threading
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from config import (
     PRODUCT_FULL_TEXTS,
@@ -108,6 +108,8 @@ from config import (
     FREEZE_JUMP_TRIGGERS_RECAL,
     IGNORED_FOREGROUND_PACKAGES,
     NAV_CLICK_COOLDOWN_SECONDS,
+    PREHEAT_LEAD_SECONDS,
+    PREHEAT_MIN_LEAD_SECONDS,
     MANUAL_LAUNCH_LEAD_SECONDS,
 )
 
@@ -207,6 +209,13 @@ class FlowCore(object):
         self._last_launch_at = None
         # NAV 点击冷却：上一次点 i购/经典 的时刻
         self._nav_click_at = None
+        # READ 分拍扫描相位：单数拍查售罄、双数拍查时间（减负）
+        self._read_phase = False
+        # 预热：本场是否已预热过详情页 / 预热进行中
+        self._preheated = False
+        self._preheat_pending = False
+        # 服务器时间偏移（秒）：time_sync 校准，整点判定用它
+        self.time_offset = 0.0
         # 当前状态已持续秒数（3 秒无进展触发本地恢复）
         self._state_elapsed = 0.0
 
@@ -500,14 +509,16 @@ class FlowCore(object):
         return True
 
     # ---------------- 生命周期 ----------------
-    def reset(self, first_target, launch_target=None):
+    def reset(self, first_target, launch_target=None, time_offset=0.0):
         """武装流程。
 
         first_target：开售整点（倒计时与抢购以此为准）；
         launch_target：拉起 i茅台 的时刻；不传则按
         MANUAL_LAUNCH_LEAD_SECONDS 在开售前提前拉起（手动定时），
-        自启动可显式传入立即拉起的时刻。
+        自启动可显式传入立即拉起的时刻；
+        time_offset：服务器时间偏移（秒），见 server_now()。
         """
+        self.time_offset = float(time_offset or 0.0)
         self.first_target = first_target
         if launch_target is None:
             launch_target = first_target - timedelta(
@@ -557,6 +568,10 @@ class FlowCore(object):
         self._pkg_cache_at = 0.0
         self._last_launch_at = None
         self._nav_click_at = None
+        self._read_phase = False
+        # 预热：每场只预热一次；预热进行中标记
+        self._preheated = False
+        self._preheat_pending = False
         self._state_elapsed = 0.0
         self._log(
             u"已设置定时，开售时刻 %s，计划拉起时刻 %s"
@@ -565,6 +580,15 @@ class FlowCore(object):
                 launch_target.strftime(u"%H:%M:%S"),
             )
         )
+        if self.time_offset:
+            self._log(
+                u"时间校准：服务器时间偏移 %+.2f 秒，整点判定按服务器时间"
+                % self.time_offset
+            )
+
+    def server_now(self):
+        """服务器当前时间（手机时间 + 校准偏移）。"""
+        return datetime.now() + timedelta(seconds=self.time_offset)
 
     @property
     def is_done(self):
@@ -1369,7 +1393,12 @@ class FlowCore(object):
         - 灰色按钮（已售罄 / xx:xx投放 / xx:xx备货中）→ 不点；
         - 黄/橙色按钮（立即抢购）→ 点；
         - 取不到颜色（旧 APK/低版本）→ 退回纯文字判断。
+
+        扫描减负：每拍必查「立即抢购」（关键路径）；
+        「已售罄」与「投放时间」分拍轮流查——每拍从 3 次全树扫描
+        降到 2 次，按钮变黄到第一击的发现延迟约减半。
         """
+        self._read_phase = not self._read_phase
         buy_visible = self._any_text(BUY_NOW_TEXTS)
         color = self._button_color_state() if buy_visible else None
 
@@ -1427,9 +1456,11 @@ class FlowCore(object):
         self._gray_elapsed = 0.0
 
         # 2) 已售罄：需二次确认——先返回列表重新进入，
-        #    再次读到的按钮仍为售罄才结束（防 H5 缓存旧状态误判）
-        #    合并一次遍历（L2），不在每个文案上各扫一遍全树
-        sold_out = self._any_text(SOLD_OUT_TEXTS)
+        #    再次读到的按钮仍为售罄才结束（防 H5 缓存旧状态误判）。
+        #    合并一次遍历（L2）+ 分拍检查（减负：单数拍查售罄）
+        sold_out = False
+        if self._read_phase:
+            sold_out = self._any_text(SOLD_OUT_TEXTS)
         if sold_out:
             if self._soldout_pending:
                 self._log(
@@ -1447,7 +1478,10 @@ class FlowCore(object):
             return
 
         # 3) 开售时间（整段精确匹配，排除按钮上方的说明文字）
-        hits = self._button_time_hits()
+        #    分拍检查（减负：双数拍查时间）；连续 N 次读数一致即采信
+        hits = []
+        if not self._read_phase:
+            hits = self._button_time_hits()
         if hits:
             hhmm = hits[0]
             # 动态稳定判断：不设固定等待，连续 N 次读数一致即采信；
@@ -1688,6 +1722,19 @@ class FlowCore(object):
         坐标仅兜底）；igou/home 交 NAV 快速接入；unknown 先拉起。
         每轮重新判定，天然重试，不盲目 goto。
         """
+        # 预热：距开售 45~90 秒之间先进一次详情页加载资源，再回列表
+        # 等到点；整点重进时 H5 已热，第一击更快。每场只预热一次。
+        if not self._preheated:
+            remaining = (self.session_target - now).total_seconds()
+            if PREHEAT_MIN_LEAD_SECONDS <= remaining <= PREHEAT_LEAD_SECONDS:
+                self._preheated = True
+                self._preheat_pending = True
+                self._log(
+                    u"距开售 %.0f 秒，先进入详情页预热资源…" % remaining
+                )
+                self._goto(ENTER_PRODUCT, u"预热详情页…")
+                return
+
         if now < self.session_target:
             self.status = u"等待开售整点 %s…" \
                 % self.session_target.strftime(u"%H:%M:%S")
@@ -1797,6 +1844,13 @@ class FlowCore(object):
         self._detail_enter_next = DETAIL_ENTER_POLL
 
         if self.bridge.text_exists(u"数量"):
+            # 预热路径：详情页加载完成即回列表，等到点再重进
+            if self._preheat_pending:
+                self._preheat_pending = False
+                self._log(u"预热完成（详情页已加载），返回列表等到点")
+                self.bridge.back()
+                self._goto(WAIT_TIME, u"预热完成，回到列表等待…")
+                return
             self._log(u"已进入详情页，开始识别年份规格")
             self._goto(SELECT_YEAR, u"已进入商品，识别年份规格…")
             return

@@ -128,14 +128,16 @@ class ButtonColorTest(unittest.TestCase):
         self.assertEqual(flow.state, RAPID_BUY)
 
     def test_gray_time_button_waits_for_target(self):
-        """灰色 + 09:00投放：读时间、回列表等待，不点"""
+        """灰色 + 09:00投放：读时间、回列表等待，不点（时间分拍检查）"""
         bridge = ColorBridge(rgb=GRAY, button=u"09:00投放",
                              time_text=u"09:00")
         flow = make_flow(bridge, datetime(2026, 11, 2, 8, 59, 0))
         now = datetime(2026, 11, 2, 8, 59, 0)
-        # 时间要连续 2 次读数一致才采信
-        flow.update(0.05, now)
-        flow.update(0.05, now)
+        # 时间分拍检查 + 连续 2 次读数一致才采信
+        for _ in range(6):
+            flow.update(0.05, now)
+            if flow.state == WAIT_TIME:
+                break
         self.assertEqual(bridge.clicks, 0)
         self.assertEqual(flow.state, WAIT_TIME)
         self.assertEqual(
@@ -149,8 +151,10 @@ class ButtonColorTest(unittest.TestCase):
                              time_text=u"09:05")
         flow = make_flow(bridge, datetime(2026, 11, 2, 9, 0, 0))
         now = datetime(2026, 11, 2, 9, 0, 0)
-        flow.update(0.05, now)
-        flow.update(0.05, now)
+        for _ in range(6):
+            flow.update(0.05, now)
+            if flow.state == WAIT_TIME:
+                break
         self.assertEqual(bridge.clicks, 0)
         self.assertEqual(flow.state, WAIT_TIME)
         self.assertEqual(

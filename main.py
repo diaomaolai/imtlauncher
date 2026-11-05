@@ -38,6 +38,7 @@ from flow_core import (
 from scheduler import (
     parse_target_time, format_remaining, next_slot, next_two_minute_mark
 )
+import time_sync
 from app_logger import AppLogger
 from app_ui import MainScreen
 from status_reporter import StatusStore
@@ -78,7 +79,9 @@ class FlowWorker(threading.Thread):
             current = time.monotonic()
             dt = current - last
             last = current
-            now_dt = datetime.now()
+            # 用服务器时间（手机时间 + 校准偏移）推进状态机，
+            # 整点判定与手机钟差无关
+            now_dt = self.flow.server_now()
             # 主循环停顿检测：后台被 ROM 冻结时线程会停摆，
             # 日志里出现几十秒空档（“到达拉起时刻”晚几十秒）。
             if dt >= 1.0 and self.logger is not None:
@@ -201,6 +204,11 @@ class IMtAssistantApp(App):
         self.card_store = CardStore()
         self.card_unlocked = False
 
+        # 服务器时间校准：启动后后台取一次偏移，武装时也会刷新
+        self._time_offset = 0.0
+        self._time_offset_at = 0.0
+        Clock.schedule_once(self._schedule_time_sync, 1.0)
+
         # 界面
         self.screen = MainScreen()
         self.screen.login_btn.bind(on_press=self._on_login_pressed)
@@ -218,6 +226,11 @@ class IMtAssistantApp(App):
         # 界面刷新循环（只更新界面；流程推进在工作线程）
         Clock.schedule_interval(self._tick, TICK_INTERVAL)
 
+        # 大退后无障碍服务可能被系统连带杀掉：启动 2 秒后检查一次并提示
+        self._a11y_check_at = 0.0
+        self._a11y_alerted = False
+        Clock.schedule_once(self._check_a11y_startup, 2.0)
+
         # 多场次自启动监控（卡密登录前 enabled=False，空转不动作）
         self.slot_monitor = SlotMonitor(
             is_running_fn=self._is_flow_running,
@@ -232,6 +245,51 @@ class IMtAssistantApp(App):
     def _ui(self, fn):
         """把 UI 操作切回 Kivy 主线程执行"""
         Clock.schedule_once(lambda _dt: fn())
+
+    # ---------------- 服务器时间校准 ----------------
+    def _schedule_time_sync(self, dt):
+        """启动后台线程校准服务器时间。"""
+        threading.Thread(
+            target=self._refresh_time_offset, daemon=True
+        ).start()
+
+    def _refresh_time_offset(self):
+        """取服务器时间偏移（NTP 优先，HTTP Date 兜底）。"""
+        offset, source = time_sync.fetch_offset()
+        if source is None:
+            self.app_logger.log(
+                u"时间校准失败（NTP/HTTP-Date 均不可用），按手机时间运行"
+            )
+            return
+        self._time_offset = offset
+        self._time_offset_at = time.monotonic()
+        self.app_logger.log(
+            u"时间校准：%s，偏移 %+.2f 秒（服务器时间 − 手机时间）"
+            % (source, offset)
+        )
+
+    def _server_now(self):
+        """服务器当前时间（手机时间 + 校准偏移）。"""
+        return datetime.now() + timedelta(seconds=self._time_offset)
+
+    def _check_a11y_startup(self, dt):
+        """
+        启动后检查无障碍服务是否连接。
+        大退（划掉任务）在华为 EMUI 上会把无障碍服务一起杀掉且不自动
+        恢复——界面能开但流程一到点就报"无障碍服务未开启"。这里提前
+        提示，让用户在设时间之前就把服务重新开好。
+        """
+        if self.bridge.is_connected():
+            return
+        self.app_logger.log(
+            u"无障碍服务未连接（可能被大退/系统杀掉，不会自动恢复）"
+        )
+        self.screen.set_status(
+            u"⚠ 无障碍服务未连接：设置→无障碍→已下载的应用→"
+            u"i茅台启动器→重新开启；并到 设置→应用→应用启动管理→"
+            u"本应用→手动管理→允许 自启动/关联启动/后台活动，"
+            u"防止大退后再被杀"
+        )
 
     def _card_and_device(self):
         """读取界面上的卡密与设备 ID。"""
@@ -445,11 +503,17 @@ class IMtAssistantApp(App):
         """
         card = self.screen.get_card_key()
         self.flow.year_target = self.screen.get_year_text()
+        # 校准偏移超过 30 分钟没刷新就现场取一次（工作线程，不卡 UI）
+        if time.monotonic() - self._time_offset_at > 1800.0:
+            self._refresh_time_offset()
         if immediate_launch:
-            self.flow.reset(target, launch_target=datetime.now())
+            self.flow.reset(
+                target, launch_target=datetime.now(),
+                time_offset=self._time_offset,
+            )
         else:
             # launch_target 自动 = target - MANUAL_LAUNCH_LEAD_SECONDS
-            self.flow.reset(target)
+            self.flow.reset(target, time_offset=self._time_offset)
         self.status_store.mark_start(scheduled_text, card)
         self.flow.on_popup_success = self._on_popup_success
         # 注入拉起回调：状态机在 IDLE/WAIT 需要时自行拉起，
@@ -510,7 +574,10 @@ class IMtAssistantApp(App):
             return
 
         try:
-            target = parse_target_time(self.screen.get_time_text())
+            # 用服务器时间判断"今天还是明天"，手机钟差不再影响定时
+            target = parse_target_time(
+                self.screen.get_time_text(), self._server_now()
+            )
         except ValueError as exc:
             self.screen.set_status(str(exc))
             return
@@ -636,6 +703,24 @@ class IMtAssistantApp(App):
     # ---------------- 界面刷新 ----------------
     def _tick(self, dt):
         """Kivy 定时刷新倒计时与状态。"""
+        # 运行中每 5 秒检查一次无障碍连接：被系统中途杀掉时立刻提示，
+        # 而不是等流程到点才报"无障碍服务未开启"。
+        now_m = time.monotonic()
+        if now_m - self._a11y_check_at >= 5.0:
+            self._a11y_check_at = now_m
+            connected = self.bridge.is_connected()
+            if not connected and not self._a11y_alerted:
+                self._a11y_alerted = True
+                self.app_logger.log(
+                    u"运行中检测到无障碍服务已断开（系统杀掉服务）"
+                )
+                self.screen.set_status(
+                    u"⚠ 无障碍服务已断开：请到 设置→无障碍 重新开启后"
+                    u"重新定时（大退/系统清理会杀掉服务）"
+                )
+            elif connected and self._a11y_alerted:
+                self._a11y_alerted = False
+                self.app_logger.log(u"无障碍服务已恢复连接")
         if self.flow.is_done:
             # 不再杀进程：保留进程与监控守护线程盯后续场次，
             # 退出由用户手动操作。
