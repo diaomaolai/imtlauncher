@@ -34,6 +34,9 @@ from config import (
 
 YEAR = u"2026"
 BUY = u"立即抢购"
+# 页面默认年份随年份换代会变（现在 2026），所以用例统一从常量推导，
+# 不要在测试里写死具体年份。
+_NON_DEFAULT_YEAR = [y for y in YEAR_CHOICES if y != DETAIL_DEFAULT_YEAR][0]
 
 
 class DetailBridge(object):
@@ -120,8 +123,9 @@ class AutoReenterTest(unittest.TestCase):
             type("L", (), {"log": lambda s, m: self.logs.append(m)})(),
         )
         self.flow.reset(datetime(2026, 11, 2, 9, 0, 0))
-        # 明确选非默认年份（2026），保证流程走"点击年份格"分支
-        self.flow.year_target = u"2026"
+        # 明确选一个**非默认**年份，保证流程走"点击年份格"分支
+        # （默认年份会直接跳过点击，见 DETAIL_DEFAULT_YEAR / year_select）
+        self.flow.year_target = _NON_DEFAULT_YEAR
         self.now = datetime(2026, 11, 2, 9, 0, 0)
 
     def tearDown(self):
@@ -151,8 +155,8 @@ class AutoReenterTest(unittest.TestCase):
         self.assertEqual(self.flow.state, WAIT_TIME)
 
     def test_default_year_skips_year_click(self):
-        """UI 选 2024（详情页默认已选）→ 不点年份，直接进数量"""
-        self.flow.year_target = u"2024"
+        """UI 选的正是页面默认年份 → 不点年份，直接进数量"""
+        self.flow.year_target = DETAIL_DEFAULT_YEAR
         self.bridge.spec_ready = True
         self._goto_year()
         self.flow.update(0.02, self.now)
@@ -160,8 +164,10 @@ class AutoReenterTest(unittest.TestCase):
         self.assertEqual(self.bridge.year_clicks, 0)
 
     def test_every_non_default_year_clicks_its_cell(self):
-        """UI 选 2026/2023/2022/2021/2020/2019 → 逐个都点对应年份格"""
-        for year in (u"2026", u"2023", u"2022", u"2021", u"2020", u"2019"):
+        """UI 选了别的年份 → 逐个都点对应年份格"""
+        others = [y for y in YEAR_CHOICES if y != DETAIL_DEFAULT_YEAR]
+        self.assertTrue(others, u"年份表不能只有默认年份")
+        for year in others:
             self.flow.year_target = year
             self.bridge.spec_ready = True
             self.bridge.year_clicks = 0

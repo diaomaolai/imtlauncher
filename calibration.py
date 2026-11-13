@@ -35,6 +35,7 @@ from config import (
 )
 from android_launcher import launch_moutai, MOUTAI_PACKAGE
 from device_profile import DeviceProfile
+from year_select import detect_with_bridge
 
 
 # ------------------------------------------------------------------
@@ -643,6 +644,21 @@ class DeviceCalibrator(object):
         tree = self._dump_tree()
         self._capture(u"detail", u"04_detail.png")
         self.controls[u"year_cells"] = self._year_records(tree)
+        # 记下页面**默认选中**的年份（红框那一格）。以后判断「要不要点年份格」
+        # 以它为准，不再依赖 config 里的兜底常量——年份换代（2024→2026→…）
+        # 时档案会自动跟着变，不用改代码。
+        # 取色需要一次截图，放在建档阶段（非点击关键路径）没有代价；
+        # 取不到就留空，运行时自动回退 config.DETAIL_DEFAULT_YEAR。
+        default_year = detect_with_bridge(
+            self.bridge, self.controls[u"year_cells"], self.logger
+        )
+        if default_year:
+            self.controls[u"default_year"] = default_year
+        else:
+            self._log(
+                u"未能识别详情页默认选中年份（取色不可用/旧 APK），"
+                u"运行时改用兜底默认年份"
+            )
         value, minus, plus = self._qty_records(tree)
         # 数量行通常比年份格晚渲染：等它出现再采集（最多 10 秒），
         # 否则档案里数量控件为空，后续无法改 6 瓶

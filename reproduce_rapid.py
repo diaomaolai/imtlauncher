@@ -4,6 +4,7 @@
 观察 RAPID 实际点击次数与最终状态（验证弹窗下立即抢购节点仍在树中）。
 """
 from datetime import datetime
+from config import SOLD_OUT_TEXTS
 from flow_core import FlowCore, RAPID_BUY, WAIT_VERIFY
 
 BUY = u"立即抢购"
@@ -33,7 +34,7 @@ class RealPhoneBridge(object):
         return t
 
     def text_exists(self, text):
-        if text in (u"已售罄", u"已售磬"):
+        if text in SOLD_OUT_TEXTS:
             return False
         return text in self._current_texts()
 

@@ -25,6 +25,9 @@ NTP_HOST = u"ntp.aliyun.com"
 NTP_PORT = 123
 HTTP_DATE_URL = u"https://www.baidu.com/"
 MAX_ABS_OFFSET = 120.0  # 偏移超过 ±120 秒视为不可信（手机时间太离谱）
+# 一次校准连采几次 NTP：误差主要来自上下行路径不对称，RTT 越小这一项
+# 越小，所以「取最小 RTT」比「取平均」更接近真值。3 次约 1~3 秒。
+NTP_SAMPLES = 3
 
 
 def parse_ntp_response(data):
@@ -39,9 +42,12 @@ def parse_ntp_response(data):
     return tx - NTP_EPOCH + frac / float(2 ** 32)
 
 
-def ntp_offset(host=NTP_HOST, port=NTP_PORT, timeout=1.0):
+def ntp_sample(host=NTP_HOST, port=NTP_PORT, timeout=1.0):
     """
-    向 NTP 服务器取偏移（秒）。返回服务器时间与本地时间的差。
+    单次 NTP 采样，返回 (偏移秒, 往返时延秒)。
+
+    偏移 = 服务器发射时刻 + 半个 RTT − 本机时间；RTT 同时返回，
+    供上层挑「路径最短」的那次结果。
     """
     packet = b"\x1b" + 47 * b"\x00"  # LI=0 VN=3 Mode=3（客户端）
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -54,7 +60,30 @@ def ntp_offset(host=NTP_HOST, port=NTP_PORT, timeout=1.0):
     rtt = got_at - sent_at
     # 服务器发射时刻 + 半程往返 ≈ 当前服务器时间
     server_now = server_epoch + rtt / 2.0
-    return server_now - time.time()
+    return (server_now - time.time(), rtt)
+
+
+def ntp_offset(host=NTP_HOST, port=NTP_PORT, timeout=1.0):
+    """
+    向 NTP 服务器取偏移（秒）：连采 NTP_SAMPLES 次，取 RTT 最小的那一次。
+
+    全部采样失败才抛异常，由 fetch_offset 退回 HTTP-Date。
+    """
+    best = None
+    last_error = None
+    for _ in range(max(1, NTP_SAMPLES)):
+        try:
+            offset, rtt = ntp_sample(host, port, timeout)
+        except Exception as exc:
+            last_error = exc
+            continue
+        if best is None or rtt < best[1]:
+            best = (offset, rtt)
+    if best is None:
+        raise last_error if last_error is not None else OSError(
+            u"NTP 无可用样本"
+        )
+    return best[0]
 
 
 def parse_http_date(header_value):

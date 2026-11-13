@@ -49,6 +49,7 @@
 全程通过 AppLogger 打印并写入 txt 日志。
 """
 
+import random
 import threading
 import time
 from datetime import datetime, timedelta
@@ -111,9 +112,22 @@ from config import (
     PREHEAT_LEAD_SECONDS,
     PREHEAT_MIN_LEAD_SECONDS,
     MANUAL_LAUNCH_LEAD_SECONDS,
+    SPLASH_SKIP_TEXTS,
+    SPLASH_SKIP_POINT_RATIO,
+    AD_POPUP_TEXTS,
+    AD_DISMISS_POINT_RATIO,
+    OVERLAY_RETRY_SECONDS,
+    OVERLAY_MAX_ATTEMPTS,
+    RESYNC_MIN_INTERVAL,
+    RESYNC_MIN_LEAD,
+    PERMISSION_PROMPT_TEXTS,
+    PERMISSION_ALLOW_TEXTS,
+    RISK_SLOW_CLICK_MIN,
+    RISK_SLOW_CLICK_MAX,
 )
 
 from android_launcher import MOUTAI_PACKAGE
+from year_select import detect_with_bridge
 
 # 状态
 IDLE = u"IDLE"                # 等待首次倒计时
@@ -216,6 +230,16 @@ class FlowCore(object):
         self._preheat_pending = False
         # 服务器时间偏移（秒）：time_sync 校准，整点判定用它
         self.time_offset = 0.0
+        # 本次会话是否已刷新过「页面默认年份」（一次截图，非关键路径）
+        self._default_year_refreshed = False
+        # 开屏广告/活动弹窗自愈：下次允许尝试的时刻 + 本场已尝试次数
+        self._overlay_next_at = None
+        self._overlay_attempts = 0
+        # 读到投放时间后重新校准服务器时间（由 main 注入 fetch_offset）
+        self.on_resync_time = None
+        self._last_resync_at = None
+        # 本场被风控杀过几次：>0 时连点放慢，降低再次触发的概率
+        self._risk_kills = 0
         # 当前状态已持续秒数（3 秒无进展触发本地恢复）
         self._state_elapsed = 0.0
 
@@ -508,6 +532,94 @@ class FlowCore(object):
         self.status = u"等待 i茅台 回到前台…"
         return True
 
+    # ---------------- 开屏广告 / 活动弹窗自愈 ----------------
+    def _screen_size(self):
+        """屏幕分辨率（档案指纹优先，取不到按 OPPO 1080x2400 兜底）。"""
+        fingerprint = getattr(self.profile, u"fingerprint", None) or {}
+        try:
+            width = int(fingerprint.get(u"screen_w") or 0)
+            height = int(fingerprint.get(u"screen_h") or 0)
+        except (TypeError, ValueError):
+            width, height = 0, 0
+        if width <= 0 or height <= 0:
+            width, height = 1080, 2400
+        return width, height
+
+    def _tap_ratio(self, ratio, what):
+        """按屏幕比例点一下（用于没有可用文字节点的广告按钮/遮罩）。"""
+        width, height = self._screen_size()
+        x = int(width * ratio[0])
+        y = int(height * ratio[1])
+        self.bridge.tap_px(x, y, TAP_JITTER_PX)
+        self._log(u"%s：按比例点击 (%d, %d)" % (what, x, y))
+        return True
+
+    def _dismiss_overlay(self, now):
+        """
+        开屏广告 / 首页活动弹窗的自愈，返回 True 表示刚做了关闭动作。
+
+        顺序：
+          0) 有权限弹窗（摄像头/存储/定位）→ 点「允许」；
+          1) 有「跳过」→ 点它；文字节点点不动（0x0 占位）再按比例坐标补一次；
+          2) 命中活动弹窗独有的文案 → 点浮层外的遮罩区把它关掉；
+          3) 都没有 → 什么都不做，交回上层逻辑。
+
+        为什么必须做：广告/弹窗会让 _current_page() 一直判成 unknown 或
+        停在 home，旧逻辑只会「每 3 秒重新拉起一次」，对广告完全无效
+        （11-12 实机连续空转 291 次，丢掉整场 20:00）。
+
+        节流与上限：每 OVERLAY_RETRY_SECONDS 最多一次、单场最多
+        OVERLAY_MAX_ATTEMPTS 次，避免广告关不掉时变成高频点击死循环。
+        """
+        if self._overlay_attempts >= OVERLAY_MAX_ATTEMPTS:
+            return False
+        if self._overlay_next_at is not None and now < self._overlay_next_at:
+            return False
+
+        # 0) 首次运行的权限弹窗：真机第一次启动就弹摄像头权限，
+        #    不点「允许」会一直卡在 unknown。
+        if self._any_text(PERMISSION_PROMPT_TEXTS):
+            for text in PERMISSION_ALLOW_TEXTS:
+                if not self.bridge.text_exists(text):
+                    continue
+                self._overlay_attempts += 1
+                self._overlay_next_at = now + timedelta(
+                    seconds=OVERLAY_RETRY_SECONDS
+                )
+                if self.bridge.click_text(text):
+                    self._log(u"权限弹窗：已点击「%s」" % text)
+                    return True
+                break
+
+        # 1) 开屏广告：优先文字，其次坐标
+        if self._any_text(SPLASH_SKIP_TEXTS):
+            for text in SPLASH_SKIP_TEXTS:
+                if not self.bridge.text_exists(text):
+                    continue
+                self._overlay_attempts += 1
+                self._overlay_next_at = now + timedelta(
+                    seconds=OVERLAY_RETRY_SECONDS
+                )
+                if self.bridge.click_text(text):
+                    self._log(u"识别到「%s」，已跳过开屏广告" % text)
+                    return True
+                return self._tap_ratio(
+                    SPLASH_SKIP_POINT_RATIO,
+                    u"「%s」节点点不动，补点跳过" % text,
+                )
+
+        # 2) 活动弹窗：点浮层外的遮罩
+        if self._any_text(AD_POPUP_TEXTS):
+            self._overlay_attempts += 1
+            self._overlay_next_at = now + timedelta(
+                seconds=OVERLAY_RETRY_SECONDS
+            )
+            return self._tap_ratio(
+                AD_DISMISS_POINT_RATIO,
+                u"识别到活动弹窗，点浮层外关闭",
+            )
+        return False
+
     # ---------------- 生命周期 ----------------
     def reset(self, first_target, launch_target=None, time_offset=0.0):
         """武装流程。
@@ -572,6 +684,15 @@ class FlowCore(object):
         # 预热：每场只预热一次；预热进行中标记
         self._preheated = False
         self._preheat_pending = False
+        # 新一场：允许重新识别一次「页面默认年份」
+        self._default_year_refreshed = False
+        # 新一场：广告自愈重新计数
+        self._overlay_next_at = None
+        self._overlay_attempts = 0
+        # 新一场：允许重新校准一次服务器时间
+        self._last_resync_at = None
+        # 新一场：风控计数清零
+        self._risk_kills = 0
         self._state_elapsed = 0.0
         self._log(
             u"已设置定时，开售时刻 %s，计划拉起时刻 %s"
@@ -606,6 +727,52 @@ class FlowCore(object):
             )
         self.status = message
         self._log(u"流程结束：%s" % message)
+
+    # ---------------- 风控自愈 ----------------
+    def force_restart_to_nav(self, reason=u"i茅台 被风控杀掉后重拉"):
+        """
+        外部（守护线程）通知：i茅台 进程被杀、且已重新拉起，强制回到 NAV。
+
+        为什么必须强制：被杀后页面状态完全不可知。沿用原来的 READ/RAPID
+        会在首页上空等到「3 秒无进展」再慢慢退回来，白丢 6~10 秒；
+        整点那一场可能就这么错过了。
+
+        顺带把临时状态清干净（预热/重进/售罄复核/自动重进轮次），
+        让重拉后走一遍干净的 i购→经典→商品。
+        """
+        self._risk_kills += 1
+        self._log(
+            u"风控重拉（本场第 %d 次）：%s，强制重新导航"
+            % (self._risk_kills, reason)
+        )
+        self._preheated = False
+        self._preheat_pending = False
+        self._soldout_pending = False
+        self._reenter_count = 0
+        self._detail_backs = 0
+        self._entry_ticks = 0
+        self._entry_wait = 0.0
+        self._slot_fast_done = False
+        self._rapid_click_count = 0
+        self._rapid_wait_left = 0.0
+        self._rapid_misses = 0
+        self._rapid_reenter_rounds = 0
+        self._nav_click_at = None
+        self._overlay_attempts = 0
+        self._overlay_next_at = None
+        self._goto(NAVIGATE_IGOU, u"风控重拉，重新走 i购→经典→商品…")
+
+    def click_delay(self):
+        """
+        本次连点间隔。
+
+        被风控杀过就放慢到 RISK_SLOW_CLICK_MIN~MAX：同样一场里，
+        宁可少点几次，也别再被判定成脚本。
+        """
+        if self._risk_kills > 0:
+            span = RISK_SLOW_CLICK_MAX - RISK_SLOW_CLICK_MIN
+            return RISK_SLOW_CLICK_MIN + random.random() * span
+        return rapid_click_delay()
 
     # ---------------- 主循环 ----------------
     def update(self, dt, now):
@@ -844,6 +1011,21 @@ class FlowCore(object):
         """是否出现「人数过多」这类并发 Toast（不停止点击，只统计）"""
         return self._any_text(SOFT_HINT_TEXTS)
 
+    def _sold_out_visible(self):
+        """
+        按钮是否显示售罄。
+
+        先在**按钮区域**内逐词判（精准），区域没命中再整页兜底。
+        之所以不能一上来就整页扫：「售罄」只有两个字，而详情页底部会
+        推荐其它商品，那些卡片可能自带「售罄」标签，整页扫会误判成
+        本场售罄而提前退出。
+        """
+        for text in SOLD_OUT_TEXTS:
+            hit = self._text_in_profile_region(u"action_button", text)
+            if hit:
+                return True
+        return self._any_text(SOLD_OUT_TEXTS)
+
     def _back_to_list(self, rounds=3):
         """
         用系统 back 退回「经典列表」，并处理 back 退多了的情况：
@@ -889,6 +1071,45 @@ class FlowCore(object):
             )
         return page == u"list"
 
+    def _maybe_resync_time(self, target, now):
+        """
+        读到投放时间后重新校准服务器时间（NTP/UDP），返回是否真的校准了。
+
+        为什么挑这一刻：整点判定靠 server_now()，而偏移是武装那一刻测的，
+        两场之间可能隔几十分钟。读时间时人正在等（离整点还远），一次
+        UDP（最坏 3 秒）不占关键路径。
+
+        两道闸：20 秒内不重复（读时间会连续触发）；离目标不足 30 秒不做
+        （别把 UDP 的阻塞堵在整点前）。
+        """
+        if not callable(getattr(self, "on_resync_time", None)):
+            return False
+        if self._last_resync_at is not None \
+                and (now - self._last_resync_at).total_seconds() \
+                < RESYNC_MIN_INTERVAL:
+            return False
+        if (target - now).total_seconds() < RESYNC_MIN_LEAD:
+            return False
+        self._last_resync_at = now
+        try:
+            offset = self.on_resync_time()
+        except Exception as exc:
+            self._log(u"时间重校准失败：%s" % exc)
+            return False
+        if offset is None:
+            return False
+        try:
+            new_offset = float(offset)
+        except (TypeError, ValueError):
+            return False
+        if abs(new_offset - self.time_offset) >= 0.05:
+            self._log(
+                u"时间重校准：偏移 %+.2f → %+.2f 秒"
+                % (self.time_offset, new_offset)
+            )
+        self.time_offset = new_offset
+        return True
+
     def _handle_sale_time(self, hhmm, now):
         """
         读到按钮区开售时间后的统一处理（READ 和 YEAR 预检共用）：
@@ -905,6 +1126,19 @@ class FlowCore(object):
         target = now.replace(
             hour=hour, minute=minute, second=0, microsecond=0
         )
+        # 读到投放时间：先打一次 UDP 校准本机时间（整点判定靠它），
+        # 校准后按新偏移重算 now/target，避免继续用旧偏移差几百毫秒。
+        if self._maybe_resync_time(target, now):
+            now = self.server_now()
+            target = now.replace(
+                hour=hour, minute=minute, second=0, microsecond=0
+            )
+        # 顺手确认「页面默认选中哪一年」：此刻人就在详情页，且距开售还有
+        # 20 秒以上，一次截图不占关键路径。每场会话最多做一次；取不到就
+        # 沿用档案/兜底常量，绝不影响本场流程。
+        if not self._default_year_refreshed \
+                and (target - now).total_seconds() >= 20.0:
+            self._refresh_default_year()
         if target <= now:
             late = (now - target).total_seconds()
             if late <= REENTER_GRACE_SECONDS:
@@ -1122,12 +1356,23 @@ class FlowCore(object):
                 # 兜底：区域没命中（档案旧/布局变），全页点一次
                 self._log(u"「i购」区域点击失败，改全页文字点击")
                 self.bridge.click_text(IGOU_TAB_TEXT)
-            # 点完验证：还停在首页说明没点进去，补一次全页点击
+            # 点完验证：还停在首页说明没点进去。可能是活动弹窗挡住了
+            # （节点级点击会命中浮层下方的 i购，但页面不会切），先补点
+            # 一次全页文字，仍不动就尝试关掉浮层。
             time.sleep(0.15)
             if self._current_page() == u"home":
                 self._log(u"点击 i购 后仍停在首页，补点一次全页文字")
                 self.bridge.click_text(IGOU_TAB_TEXT)
+                time.sleep(0.15)
+                if self._current_page() == u"home":
+                    self._dismiss_overlay(now)
             self.status = u"已点击 i购，等待页面加载…"
+            return
+
+        # 认不出页面：1 秒后先判是不是开屏广告/活动弹窗遮挡——
+        # 关掉就继续等页面出现；关不掉才走「重新拉起」那条路。
+        # 拉起对广告完全无效（11-12 实机空转 291 次就是这么来的）。
+        if self._state_elapsed >= 1.0 and self._dismiss_overlay(now):
             return
 
         # unknown：冷启动/加载中，动态等待可识别页面出现；
@@ -1176,6 +1421,48 @@ class FlowCore(object):
         )
         self.status = u"等待商品列表页…"
 
+    # ---------------- 页面默认年份 ----------------
+    def default_year(self):
+        """
+        详情页「默认选中」的年份——判断要不要点年份格的基准。
+
+        优先用档案里建档时取色识别出来的值（controls['default_year']），
+        这样年份换代（2024→2026→…）时自动跟着页面走；旧档案没有这个
+        字段才退回 config.DETAIL_DEFAULT_YEAR。
+        """
+        controls = getattr(self.profile, u"controls", None) or {}
+        value = controls.get(u"default_year")
+        if value:
+            return u"%s" % value
+        return DETAIL_DEFAULT_YEAR
+
+    def _refresh_default_year(self):
+        """
+        在详情页取一次色，重新确认「页面默认选中哪一年」并写回档案。
+
+        只能在非点击关键路径调用（距开售还有 20 秒以上时）：取色要截图，
+        耗时 0.3~3 秒。每场会话最多一次；取不到就保持原值。
+        """
+        if self._default_year_refreshed:
+            return False
+        self._default_year_refreshed = True
+        controls = getattr(self.profile, u"controls", None)
+        if not controls:
+            return False
+        cells = controls.get(u"year_cells")
+        if not cells:
+            return False
+        year = detect_with_bridge(self.bridge, cells, self.logger)
+        if not year:
+            return False
+        if year != controls.get(u"default_year"):
+            self._log(
+                u"页面默认年份已更新为 %s（原档案：%s）"
+                % (year, controls.get(u"default_year") or u"未记录")
+            )
+        controls[u"default_year"] = year
+        return True
+
     # ---------------- SELECT_YEAR ----------------
     def _update_select_year(self, dt, now):
         """
@@ -1203,14 +1490,20 @@ class FlowCore(object):
             return
 
         year = self.year_target or YEAR_TARGET_TEXT
-        # 详情页每次进入默认已选 DETAIL_DEFAULT_YEAR（实拍 2024）：
-        # UI 选的也是它就不点年份，直接进数量；选其它年份才点对应格。
-        if year == DETAIL_DEFAULT_YEAR:
+        # 详情页每次进入都会重置回它自己的默认年份（档案里取色识别得到）：
+        # 目标与它一致就不点年份格，直接进数量；不一致就必须点对应格，
+        # 否则下的是另一年的货。
+        page_default = self.default_year()
+        if year == page_default:
             self._log(
                 u"详情页默认已是 %s，无需点击年份" % year
             )
             self._goto(SELECT_QTY, u"年份默认%s，修改数量…" % year)
             return
+        self._log(
+            u"目标年份 %s 与页面默认 %s 不同，点击年份格"
+            % (year, page_default)
+        )
         # UI 选了未知年份时退回默认年份的识别框；
         # 档案年份格 bounds 优先，无档案退回固定 px
         legacy_region = YEAR_CELL_REGION_PX.get(
@@ -1425,7 +1718,7 @@ class FlowCore(object):
                 )
                 # 第一下已在 READ 点出，下一次点击前先等一个
                 # 独立随机的 0.00~0.99 秒
-                self._rapid_wait_left = rapid_click_delay()
+                self._rapid_wait_left = self.click_delay()
                 # 本轮连点达到该随机次数后自动 back 重进刷新
                 self._rapid_reenter_limit = rapid_reenter_count()
                 self._log(
@@ -1460,7 +1753,7 @@ class FlowCore(object):
         #    合并一次遍历（L2）+ 分拍检查（减负：单数拍查售罄）
         sold_out = False
         if self._read_phase:
-            sold_out = self._any_text(SOLD_OUT_TEXTS)
+            sold_out = self._sold_out_visible()
         if sold_out:
             if self._soldout_pending:
                 self._log(
@@ -1552,7 +1845,7 @@ class FlowCore(object):
         # 3b) 售罄检查：点不中时必查（按钮文字消失）；点位正常时
         #     每 5 次点击才查一次，且合并一次遍历（L2）。
         if not clicked or self._rapid_click_count % 5 == 0:
-            if self._any_text(SOLD_OUT_TEXTS):
+            if self._sold_out_visible():
                 self._soldout_pending = True
                 self._log(
                     u"识别到「已售罄」，停止连点，"
@@ -1643,7 +1936,7 @@ class FlowCore(object):
             )
 
         # 8) 安排下一次点击的独立随机间隔
-        self._rapid_wait_left = rapid_click_delay()
+        self._rapid_wait_left = self.click_delay()
         self.status = (
             u"已点 %d 次，%.2f 秒后点下一次…"
             % (self._rapid_click_count, self._rapid_wait_left)
@@ -1828,7 +2121,8 @@ class FlowCore(object):
         """
         整点快速入页后：等详情页渲染。
         只查「数量」是否出现（1 次调用），每 DETAIL_ENTER_POLL 秒查一次；
-        超时（DETAIL_ENTER_TIMEOUT）退回页面识别，避免点空后卡死。
+        超时先看按钮是否已渲染——渲染了就按详情页继续（YEAR 会预检按钮，
+        不会误点）；按钮也没有才退回页面识别，避免点空后卡死。
         """
         if not self.bridge.is_connected():
             self._finish(
@@ -1856,6 +2150,16 @@ class FlowCore(object):
             return
 
         if self._detail_enter_elapsed >= DETAIL_ENTER_TIMEOUT:
+            # 超时不等于没进详情：「数量」行常比按钮晚渲染。先花一次扫描
+            # 看按钮文字，已经出现就直接进 YEAR（YEAR 会先预检按钮状态，
+            # 是投放时间会自己退回等待，不会误点）。这一步是为了避开
+            # 「回 NAV 重新判页面再回来」那 3 秒——11-13 整点就是这么丢的。
+            if self._any_text(BUY_NOW_TEXTS) or self._sold_out_visible():
+                self._log(
+                    u"未见「数量」但按钮已渲染，按详情页继续识别"
+                )
+                self._goto(SELECT_YEAR, u"按钮已渲染，识别年份规格…")
+                return
             self._log(u"等待详情页超时，退回页面识别重进")
             self._goto(NAVIGATE_IGOU, u"详情未打开，重新接入…")
             return

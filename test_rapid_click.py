@@ -17,6 +17,7 @@ import unittest
 from datetime import datetime
 
 import flow_core
+from config import SOLD_OUT_TEXTS
 from flow_core import (
     FlowCore,
     RAPID_BUY,
@@ -45,7 +46,8 @@ class RapidBridge(object):
         return None
 
     def text_exists(self, text):
-        if text in (u"已售罄", u"已售磬"):
+        # 售罄词表以 config 为准（按钮可能写「售罄」或「已售罄」）
+        if text in SOLD_OUT_TEXTS:
             return self.soldout
         # 真机语义：控件文字「包含」即命中
         return any(text in t for t in self.texts)

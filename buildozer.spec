@@ -9,12 +9,12 @@ package.domain = org.personal
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,xml,ttf,ttc
 # .git / __pycache__ / APK 归档目录都不参与打包
-source.exclude_dirs = bin,buildozer,.buildozer,.github,.git,__pycache__,apk_download
+source.exclude_dirs = bin,buildozer,.buildozer,.github,.git,__pycache__,apk_download,_video_frames,tools,docs
 # 开发测试脚本、日志、UI 预览图、说明文档不进 APK（buildozer 1.4+ 支持）
 source.exclude_patterns = apk_download_*,test_*.py,diag_*.py,sim_*.py,reproduce_*.py,verify_*.py,UI*.png,*.txt,*.md
 
 # 版本号
-version = 1.8.0
+version = 1.8.1
 
 # 依赖：python3 + kivy 界面 + pyjnius 调安卓原生 API
 # certifi：内置 CA 根证书库（修复 Android 上 HTTPS 证书校验失败）

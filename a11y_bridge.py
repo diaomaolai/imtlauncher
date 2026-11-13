@@ -41,6 +41,8 @@ class A11yBridge(object):
         self._exact_regex_supported = True
         # 服务端是否支持区域取色（旧 APK/低版本没有，首次失败后退回）
         self._color_supported = True
+        # 服务端是否支持一次截图批量取最红像素（新增，旧包自动退回）
+        self._batch_red_supported = True
         if _ANDROID:
             self._init_native()
 
@@ -295,6 +297,46 @@ class A11yBridge(object):
             # 方法不存在（旧 APK）或低版本：本次起不再尝试
             self._color_supported = False
             return None
+
+    def max_red_in_regions(self, regions):
+        """
+        一次截图内批量取每块区域「最红像素」，返回 [(r,g,b) 或 None, ...]。
+
+        用于识别当前选中的年份格：选中格红色描边+红字，未选中格灰字+
+        浅灰描边。取最红像素（R - max(G,B) 最大者）而不是平均值，
+        这样 2px 细描边不会被白底稀释。旧 APK 没有该方法时返回 None，
+        调用方退回固定默认年份。
+        """
+        service = self._service_or_none()
+        if service is None or not self._batch_red_supported:
+            return None
+        if not regions:
+            return []
+        flat = []
+        for region_px in regions:
+            min_x, min_y, max_x, max_y = region_px
+            flat.extend([int(min_x), int(min_y), int(max_x), int(max_y)])
+        try:
+            raw = service.maxRedInRegions(flat)
+        except Exception:
+            # 方法不存在（旧 APK）：本次起不再尝试
+            self._batch_red_supported = False
+            return None
+        if raw is None:
+            return None
+        values = [int(v) for v in raw]
+        if len(values) < len(regions) * 3:
+            return None
+        result = []
+        for index in range(len(regions)):
+            red = values[index * 3]
+            green = values[index * 3 + 1]
+            blue = values[index * 3 + 2]
+            if red < 0 or green < 0 or blue < 0:
+                result.append(None)
+            else:
+                result.append((red, green, blue))
+        return result
 
     # ---------------- 手势点击 ----------------
     def tap_px(self, x, y, jitter_px=6):

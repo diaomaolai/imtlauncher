@@ -29,6 +29,7 @@ from config import (
     BUY_NOW_TEXTS,
     PRODUCT_FULL_TEXTS,
 )
+from config import SOLD_OUT_TEXTS
 from flow_core import (
     FlowCore,
     READ_DETAIL,
@@ -186,7 +187,7 @@ class Phone(object):
 
     def text_exists(self, text):
         self._cost()
-        if text in (u"已售罄", u"已售磬"):
+        if text in SOLD_OUT_TEXTS:
             return False
         return self._find(text) is not None
 

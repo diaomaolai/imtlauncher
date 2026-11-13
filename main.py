@@ -25,6 +25,8 @@ from config import APP_TITLE, TICK_INTERVAL
 from font_setup import register_cjk_font
 from a11y_bridge import A11yBridge
 from android_launcher import launch_moutai
+from risk_guard import RiskGuardian
+from flip_probe import FlipProbe
 from flow_core import (
     FlowCore,
     RAPID_BUY,
@@ -200,6 +202,10 @@ class IMtAssistantApp(App):
         self.profile_store = ProfileStore(logger=self.app_logger)
         self.calibration_worker = None
         self.calibration_stop = None
+        # 风控自愈守护线程（两场窗口内自检 i茅台 是否被杀）
+        self.risk_guardian = None
+        # 按钮翻转探针（App 内诊断，不扣次、不走卡密）
+        self.probe = None
         self._pending_after_fn = None
         self.card_store = CardStore()
         self.card_unlocked = False
@@ -214,6 +220,7 @@ class IMtAssistantApp(App):
         self.screen.login_btn.bind(on_press=self._on_login_pressed)
         self.screen.schedule_btn.bind(on_press=self._on_schedule_pressed)
         self.screen.set_time_btn.bind(on_press=self._on_set_time_pressed)
+        self.screen.probe_btn.bind(on_press=self._on_probe_pressed)
 
         # 回填上次登录成功的卡密，大退重启后无需重新输入
         saved_card = self.card_store.get()
@@ -254,19 +261,32 @@ class IMtAssistantApp(App):
         ).start()
 
     def _refresh_time_offset(self):
-        """取服务器时间偏移（NTP 优先，HTTP Date 兜底）。"""
+        """取服务器时间偏移（NTP 优先，HTTP Date 兜底）；成功返回 True。"""
         offset, source = time_sync.fetch_offset()
         if source is None:
             self.app_logger.log(
                 u"时间校准失败（NTP/HTTP-Date 均不可用），按手机时间运行"
             )
-            return
+            return False
         self._time_offset = offset
         self._time_offset_at = time.monotonic()
         self.app_logger.log(
             u"时间校准：%s，偏移 %+.2f 秒（服务器时间 − 手机时间）"
             % (source, offset)
         )
+        return True
+
+    def _resync_time(self):
+        """
+        状态机「读到投放时间」时回调：重新取一次偏移，返回秒数或 None。
+
+        必须把结果写回 flow.time_offset——状态机的整点判定只认自己那份
+        偏移，不同步的话这次校准等于白做。
+        """
+        if not self._refresh_time_offset():
+            return None
+        self.flow.time_offset = self._time_offset
+        return self._time_offset
 
     def _server_now(self):
         """服务器当前时间（手机时间 + 校准偏移）。"""
@@ -516,6 +536,9 @@ class IMtAssistantApp(App):
             self.flow.reset(target, time_offset=self._time_offset)
         self.status_store.mark_start(scheduled_text, card)
         self.flow.on_popup_success = self._on_popup_success
+        # 注入时间重校准：状态机每次读到「xx:xx投放 / 补货中~xx:xx投放」，
+        # 会在等待期再打一次 UDP 确认本机时间（离整点太近时自己会跳过）。
+        self.flow.on_resync_time = self._resync_time
         # 注入拉起回调：状态机在 IDLE/WAIT 需要时自行拉起，
         # 已在前台时 launch 幂等无副作用
         self.flow.on_launch_app = lambda: launch_moutai(self.app_logger)
@@ -529,6 +552,17 @@ class IMtAssistantApp(App):
         self.flow_worker.start()
         # 前台保活：切到 i茅台 后本进程仍在后台运行，防止被 ROM 冻结
         keep_alive.start(self.app_logger)
+
+        # 风控自愈守护：09:00–10:00 / 20:00–21:00 内自检 i茅台 是否被杀，
+        # 被杀就冷却重拉并强制回到 NAV 重新导航（旧实例先停掉，避免叠加）
+        if self.risk_guardian is not None:
+            self.risk_guardian.stop()
+            self.risk_guardian = None
+        self.risk_guardian = RiskGuardian(
+            self.bridge, self.flow, self.app_logger,
+            lambda: launch_moutai(self.app_logger),
+        )
+        self.risk_guardian.start()
 
         self._ui(lambda: self.screen.set_schedule_button_armed(True))
         if immediate_launch:
@@ -555,6 +589,61 @@ class IMtAssistantApp(App):
             u"点「设置定时」开始" % text
         )
         self.app_logger.log(u"自动设置时间：%s" % text)
+
+    # ---------------- 按钮翻转探针（App 内诊断） ----------------
+    def _on_probe_pressed(self, instance):
+        """
+        诊断：测量「停在详情页不动，整点到了按钮会不会自己翻转」。
+
+        不校验卡密、不扣次——它不下单，只是把 App 导航到详情页后
+        持续取按钮颜色，结果写到日志目录的 flip_probe_*.txt / .csv。
+
+        再按一次可停止。
+        """
+        if self.probe is not None and self.probe.is_alive():
+            self.probe.stop()
+            self.probe = None
+            self._ui(lambda: self.screen.set_probe_running(False))
+            self.screen.set_status(u"诊断已停止")
+            self.app_logger.log(u"按钮翻转诊断已手动停止")
+            return
+
+        if not self.bridge.is_connected():
+            self.screen.set_status(
+                u"请先开启无障碍服务，再运行按钮翻转诊断"
+            )
+            return
+
+        # 目标时刻：优先用界面上已设的定时时间，没设就用下一个场次
+        try:
+            target = parse_target_time(
+                self.screen.get_time_text(), self._server_now()
+            )
+        except ValueError:
+            target = next_slot(self._server_now())
+        # 校准一次时间，避免拿手机钟去对齐整点
+        if self._refresh_time_offset():
+            target = target + timedelta(seconds=0)
+
+        profile = None
+        try:
+            fingerprint, _metrics, _pkg = build_fingerprint()
+            profile = self.profile_store.find_matching(fingerprint)
+        except Exception:
+            profile = None
+
+        self.probe = FlipProbe(
+            self.bridge, self.app_logger, target, profile=profile,
+        )
+        self.probe.start()
+        self.screen.set_probe_running(True)
+        self.screen.set_status(
+            u"诊断进行中：%s 前 20 秒开始取样，结果写入日志目录"
+            % target.strftime(u"%H:%M:%S")
+        )
+        self.app_logger.log(
+            u"按钮翻转诊断启动，目标 %s" % target.strftime(u"%H:%M:%S")
+        )
 
     def _on_schedule_pressed(self, instance):
         """设置定时 / 取消定时 按钮回调"""
@@ -693,6 +782,9 @@ class IMtAssistantApp(App):
         if self.flow_worker is not None:
             self.flow_worker.stop()
             self.flow_worker = None
+        if self.risk_guardian is not None:
+            self.risk_guardian.stop()
+            self.risk_guardian = None
         self._pending_after_fn = None
         keep_alive.stop(self.app_logger)
         self.screen.set_schedule_button_armed(False)

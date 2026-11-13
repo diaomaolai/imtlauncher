@@ -273,8 +273,16 @@ class MainScreen(BoxLayout):
         )
         self.add_widget(self.countdown_label)
 
-        # 弹簧
-        self.add_widget(Widget(size_hint=(1, 0.04)))
+        # 诊断入口：测量「停在详情页不动，整点到了按钮会不会自己翻转」。
+        # 占原来弹簧的位置，不改变整体布局高度。
+        self.probe_btn = Button(
+            text=u"诊断：测量按钮翻转时刻",
+            font_size="13sp",
+            color=(0.30, 0.30, 0.30, 1),
+            background_color=(0.80, 0.80, 0.78, 1),
+            size_hint=(1, 0.04),
+        )
+        self.add_widget(self.probe_btn)
 
     def _redraw_background(self, *args):
         """重绘界面背景。"""
@@ -304,6 +312,13 @@ class MainScreen(BoxLayout):
     def set_card_info(self, text):
         """显示卡密信息（剩余次数/到期时间）"""
         self.card_info_label.text = text
+
+    def set_probe_running(self, running):
+        """诊断按钮状态：运行中显示为可点击停止。"""
+        self.probe_btn.text = (
+            u"诊断进行中…（点击停止）" if running
+            else u"诊断：测量按钮翻转时刻"
+        )
 
     # ---- 年份 ----
     def get_year_text(self):

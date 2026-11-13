@@ -898,6 +898,122 @@ public class MtA11yService extends AccessibilityService {
     }
 
     /**
+     * 批量取「最红像素」：一次截图内对多块区域分别求 R - max(G,B) 最大的像素。
+     *
+     * 用途：识别 i茅台 详情页当前选中的年份格。选中格是红色描边 + 红字，
+     * 未选中格是灰字 + 浅灰描边；取最红像素不会被白底稀释，2px 细描边也
+     * 能稳定命中（实测选中格 redness≈172，未选中格恒为 0）。
+     *
+     * flat 为 [x1,y1,x2,y2, x1,y1,x2,y2, ...]（绝对像素，含端点）；
+     * 返回 [r,g,b, r,g,b, ...]，取不到的区域填 -1。
+     * 低版本或截屏失败返回 null（调用方退回固定默认年份）。
+     */
+    public int[] maxRedInRegions(final int[] flat) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return null;
+        }
+        if (flat == null || flat.length < 4 || flat.length % 4 != 0) {
+            return null;
+        }
+        final int regions = flat.length / 4;
+        final int[] out = new int[regions * 3];
+        for (int i = 0; i < regions; i++) {
+            out[i * 3] = -1;
+            out[i * 3 + 1] = -1;
+            out[i * 3 + 2] = -1;
+        }
+        final CountDownLatch latch = new CountDownLatch(1);
+        try {
+            takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(),
+                    new TakeScreenshotCallback() {
+                        @Override
+                        public void onSuccess(ScreenshotResult screenshot) {
+                            Bitmap hardware = null;
+                            Bitmap software = null;
+                            try {
+                                hardware = Bitmap.wrapHardwareBuffer(
+                                        screenshot.getHardwareBuffer(),
+                                        screenshot.getColorSpace());
+                                if (hardware == null) {
+                                    return;
+                                }
+                                software = hardware.copy(
+                                        Bitmap.Config.ARGB_8888, false);
+                                if (software == null) {
+                                    return;
+                                }
+                                int width = software.getWidth();
+                                int height = software.getHeight();
+                                for (int i = 0; i < regions; i++) {
+                                    int left = Math.max(0, flat[i * 4]);
+                                    int top = Math.max(0, flat[i * 4 + 1]);
+                                    int right = Math.min(
+                                            width - 1, flat[i * 4 + 2]);
+                                    int bottom = Math.min(
+                                            height - 1, flat[i * 4 + 3]);
+                                    if (right <= left || bottom <= top) {
+                                        continue;
+                                    }
+                                    int rowLen = right - left + 1;
+                                    int[] row = new int[rowLen];
+                                    int bestR = -1, bestG = -1, bestB = -1;
+                                    int bestScore = Integer.MIN_VALUE;
+                                    for (int y = top; y <= bottom; y++) {
+                                        software.getPixels(row, 0, rowLen,
+                                                left, y, rowLen, 1);
+                                        for (int x = 0; x < rowLen; x++) {
+                                            int pixel = row[x];
+                                            int r = (pixel >> 16) & 0xFF;
+                                            int g = (pixel >> 8) & 0xFF;
+                                            int b = pixel & 0xFF;
+                                            int score = r - Math.max(g, b);
+                                            if (score > bestScore) {
+                                                bestScore = score;
+                                                bestR = r;
+                                                bestG = g;
+                                                bestB = b;
+                                            }
+                                        }
+                                    }
+                                    if (bestScore > Integer.MIN_VALUE) {
+                                        out[i * 3] = bestR;
+                                        out[i * 3 + 1] = bestG;
+                                        out[i * 3 + 2] = bestB;
+                                    }
+                                }
+                            } catch (Exception e) {
+                                // 保持 -1，调用方按「取不到」处理
+                            } finally {
+                                if (software != null) {
+                                    software.recycle();
+                                }
+                                if (hardware != null) {
+                                    hardware.recycle();
+                                }
+                                latch.countDown();
+                            }
+                        }
+
+                        @Override
+                        public void onFailure(int errorCode) {
+                            latch.countDown();
+                        }
+                    }, null);
+        } catch (Exception e) {
+            return null;
+        }
+        try {
+            // 只在建档/武装阶段调用，允许比点击路径宽松：最多等 3 秒
+            if (!latch.await(3000, TimeUnit.MILLISECONDS)) {
+                return null;
+            }
+        } catch (InterruptedException e) {
+            return null;
+        }
+        return out;
+    }
+
+    /**
      * 当前前台窗口的包名（取应用窗口 root 的 packageName）。
      *
      * 用途：判断"是否还在 i茅台"。手机桌面（华为桌面/ColorOS 桌面）、
