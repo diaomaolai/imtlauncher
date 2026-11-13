@@ -998,7 +998,7 @@ public class MtA11yService extends AccessibilityService {
                         public void onFailure(int errorCode) {
                             latch.countDown();
                         }
-                    }, null);
+                    });
         } catch (Exception e) {
             return null;
         }
