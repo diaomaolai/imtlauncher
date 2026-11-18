@@ -21,6 +21,7 @@ from config import SOLD_OUT_TEXTS
 from flow_core import (
     FlowCore,
     RAPID_BUY,
+    READ_DETAIL,
     WAIT_VERIFY,
     ENTER_PRODUCT,
 )
@@ -181,6 +182,17 @@ class RapidClickTest(unittest.TestCase):
         self.bridge.soldout = True
         self._run(0.5)
         self.assertEqual(self.flow.state, ENTER_PRODUCT)
+
+    def test_buy_confirmation_requires_two_ticks(self):
+        """点回目标年份后：按钮要连读两次可点，才真正点下去"""
+        self.flow.state = READ_DETAIL
+        self.flow._buy_confirm_pending = True
+        self.flow._buy_confirm_count = 0
+        self.flow.update(0.01, self.now)
+        self.assertEqual(self.bridge.buy_clicks, 0, u"第一拍只确认，不点")
+        self.flow.update(0.01, self.now)
+        self.assertEqual(self.bridge.buy_clicks, 1, u"第二拍才点")
+        self.assertFalse(self.flow._buy_confirm_pending)
 
     def test_no_click_when_button_missing(self):
         """按钮不在（弹窗遮挡）：连续点不中后回详情重识别"""

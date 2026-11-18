@@ -11,7 +11,7 @@ import time
 
 # ---------------- 基础信息 ----------------
 APP_TITLE = u"i茅台助手"
-APP_VERSION = "1.8.1"
+APP_VERSION = "1.8.2"
 
 # 目标设备基准：OPPO PDSM00 1080x2400（下面所有绝对像素都按此实测）
 
@@ -207,7 +207,11 @@ RISK_KILL_TEXTS = (u"当前设备异常", u"i茅台无法运行", u"秒后自动
 # 冷却很重要：风控是设备级的，立刻重拉大概率立刻再被杀。
 RISK_CHECK_INTERVAL = 2.0
 RISK_COOLDOWN_SECONDS = 25.0
-RISK_MAX_RELAUNCH = 6
+# 被反复杀时冷却逐步加长（25 → 40 → 55 → 60 封顶），避免变成高频重拉死循环
+RISK_COOLDOWN_STEP = 15.0
+RISK_COOLDOWN_MAX = 60.0
+# 单场重拉上限：0 表示不限次数（风控期间「随时保持拉起」）
+RISK_MAX_RELAUNCH = 0
 # 被杀过一次之后把连点间隔放慢（宁可少点几次，也别再被杀）
 RISK_SLOW_CLICK_MIN = 0.30
 RISK_SLOW_CLICK_MAX = 0.90
@@ -357,6 +361,9 @@ YEAR_TARGET_TEXT = DETAIL_DEFAULT_YEAR
 # 描边像素 (179,42,50) → 129；未选中格灰字/浅灰描边 → 恒为 0。
 # 取 90：选中格远超、未选中格恒不达标，两侧余量都很大。
 YEAR_RED_MIN = 90
+# 「切年份刷新」两次点击之间的等待：点完另一格等页面把 SKU 数据刷过来，
+# 再点回目标年份。太短会连点两次被吞，太长会拖慢整点那一击。
+YEAR_SWITCH_SETTLE_SECONDS = 0.25
 # 每个年份格对应的区域限定识别框（绝对像素，只框住该格，留少量边距）
 YEAR_CELL_REGION_PX = {
     u"2026": (150, 1490, 435, 1590),

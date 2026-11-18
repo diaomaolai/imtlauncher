@@ -96,6 +96,8 @@ from config import (
     JINGDIAN_TAB_TEXT,
     JINGDIAN_TAB_REGION_PX,
     YEAR_TARGET_TEXT,
+    YEAR_CHOICES,
+    YEAR_SWITCH_SETTLE_SECONDS,
     DETAIL_DEFAULT_YEAR,
     YEAR_CELL_REGION_PX,
     QTY_TARGET,
@@ -240,6 +242,9 @@ class FlowCore(object):
         self._last_resync_at = None
         # 本场被风控杀过几次：>0 时连点放慢，降低再次触发的概率
         self._risk_kills = 0
+        # 到点「点回目标年份」后，按钮状态要连读两次再点（防半刷新误点）
+        self._buy_confirm_pending = False
+        self._buy_confirm_count = 0
         # 当前状态已持续秒数（3 秒无进展触发本地恢复）
         self._state_elapsed = 0.0
 
@@ -693,6 +698,9 @@ class FlowCore(object):
         self._last_resync_at = None
         # 新一场：风控计数清零
         self._risk_kills = 0
+        # 新一场：按钮状态确认重新计数
+        self._buy_confirm_pending = False
+        self._buy_confirm_count = 0
         self._state_elapsed = 0.0
         self._log(
             u"已设置定时，开售时刻 %s，计划拉起时刻 %s"
@@ -1149,9 +1157,10 @@ class FlowCore(object):
                         u"退出重进第 %d 次"
                         % (hhmm, late, self._reenter_count)
                     )
-                if not self._back_to_list():
-                    self._log(u"未能回到列表，仍按重进刷新处理")
-                # 目标仍是本场整点（已过），WAIT 下一拍立即重进
+                if not self._switch_year():
+                    if not self._back_to_list():
+                        self._log(u"切年份/回列表都失败，仍按重进刷新处理")
+                # 目标仍是本场整点（已过），WAIT 下一拍立即刷新
                 self.session_target = target
                 self.display_target = target
                 self._goto(
@@ -1171,10 +1180,11 @@ class FlowCore(object):
         else:
             self._reenter_count = 0
             self._log(
-                u"读取到开售时间 %s（未来），返回列表，等待整点" % hhmm
+                u"读取到开售时间 %s（未来），切到别的年份，等待整点" % hhmm
             )
-        if not self._back_to_list():
-            self._log(u"未能回到列表，仍按等待处理（到点重进）")
+        if not self._switch_year():
+            if not self._back_to_list():
+                self._log(u"切年份/回列表都失败，仍按等待处理（到点重进）")
         self.session_target = target
         self.display_target = target
         self._goto(
@@ -1463,6 +1473,91 @@ class FlowCore(object):
         controls[u"default_year"] = year
         return True
 
+    # ---------------- 切年份刷新 ----------------
+    def _click_year_cell(self, year):
+        """点某个年份格；成功返回 True。"""
+        if not year:
+            return False
+        legacy_region = YEAR_CELL_REGION_PX.get(
+            year, YEAR_CELL_REGION_PX.get(YEAR_TARGET_TEXT)
+        )
+        region = self._region(u"year_cells", legacy_region, sub_key=year)
+        try:
+            if self.bridge.click_text_in_px_region(year, region):
+                return True
+        except Exception:
+            pass
+        try:
+            return bool(self.bridge.click_text(year))
+        except Exception:
+            return False
+
+    def _other_year(self, target):
+        """取一个与目标不同的年份：目标年份的下一格，越界绕回第一格。"""
+        try:
+            choices = [u"%s" % item for item in YEAR_CHOICES]
+        except Exception:
+            return None
+        if not choices:
+            return None
+        if target not in choices:
+            for candidate in choices:
+                if candidate != target:
+                    return candidate
+            return None
+        index = choices.index(target)
+        for step in range(1, len(choices)):
+            candidate = choices[(index + step) % len(choices)]
+            if candidate != target:
+                return candidate
+        return None
+
+    def _switch_year(self, target_year=None):
+        """
+        切年份刷新：先点另一个年份，再点回目标年份。
+
+        这是「页内刷新」——不离开详情页，靠切换 SKU 让页面重新拉数据，
+        比「退回列表 → 再点商品 → 等整页重载」快得多（后者 2~6 秒）。
+
+        返回 True 表示两次点击都成功；False 时调用方应退回老的
+        「退回列表再进」兜底（例如档案里没有年份格）。
+        """
+        target = target_year or self.year_target or YEAR_TARGET_TEXT
+        other = self._other_year(target)
+        if other is None:
+            self._log(u"切年份刷新失败：取不到「另一个年份」")
+            return False
+        if not self._click_year_cell(other):
+            self._log(u"切年份刷新失败：点不中 %s" % other)
+            return False
+        time.sleep(YEAR_SWITCH_SETTLE_SECONDS)
+        if not self._click_year_cell(target):
+            self._log(u"切年份刷新失败：点不回 %s" % target)
+            return False
+        time.sleep(YEAR_SWITCH_SETTLE_SECONDS)
+        self._log(u"切年份刷新完成：%s → %s → %s"
+                  % (target, other, target))
+        return True
+
+    def _refresh_detail_in_place(self, reason):
+        """
+        刷新详情页（供售罄复核 / 连点重进 / 到点进入共用）。
+
+        成功：页内切年份往返，回到 SELECT_QTY（数量可能被 SKU 切换重置，
+        必须重新确认），再进 READ。
+        失败：退回列表重新点商品（老路径，兜底）。
+        """
+        if self._switch_year():
+            self._goto(SELECT_QTY, u"%s（切年份刷新）…" % reason)
+            return True
+        self._log(u"%s：切年份不可用，退回列表重新进入" % reason)
+        try:
+            self.bridge.back()
+        except Exception:
+            pass
+        self._goto(ENTER_PRODUCT, u"%s（退回列表重进）…" % reason)
+        return False
+
     # ---------------- SELECT_YEAR ----------------
     def _update_select_year(self, dt, now):
         """
@@ -1697,6 +1792,17 @@ class FlowCore(object):
 
         # 1) 可点：按钮文字是立即抢购，且颜色不是灰
         if buy_visible and color != u"gray":
+            # 刚点回目标年份时，SKU 可能还在半刷新：连读两次都是可点才动手
+            if self._buy_confirm_pending:
+                self._buy_confirm_count += 1
+                self.status = (
+                    u"确认按钮状态 %d/2…" % self._buy_confirm_count
+                )
+                if self._buy_confirm_count < 2:
+                    return
+                self._buy_confirm_pending = False
+                self._buy_confirm_count = 0
+                self._log(u"按钮状态连读两次均可点，开始点击")
             hit = self._tap_buy()
             if hit is None and color == u"buy":
                 center = self._button_center()
@@ -1757,17 +1863,15 @@ class FlowCore(object):
         if sold_out:
             if self._soldout_pending:
                 self._log(
-                    u"二次进入确认仍为「已售罄」，返回列表，结束启动器"
+                    u"二次确认仍为「已售罄」，结束启动器"
                 )
-                self.bridge.back()
                 self._finish(True, u"商品已售罄（二次确认），启动器结束")
                 return
             self._soldout_pending = True
             self._log(
-                u"首次识别到「已售罄」，返回列表并重新进入复核"
+                u"首次识别到「已售罄」，切年份刷新后复核"
             )
-            self.bridge.back()
-            self._goto(ENTER_PRODUCT, u"售罄复核，重新进入确认…")
+            self._refresh_detail_in_place(u"售罄复核")
             return
 
         # 3) 开售时间（整段精确匹配，排除按钮上方的说明文字）
@@ -1849,10 +1953,9 @@ class FlowCore(object):
                 self._soldout_pending = True
                 self._log(
                     u"识别到「已售罄」，停止连点，"
-                    u"返回列表并重新进入复核"
+                    u"切年份刷新后复核"
                 )
-                self.bridge.back()
-                self._goto(ENTER_PRODUCT, u"售罄复核，重新进入确认…")
+                self._refresh_detail_in_place(u"售罄复核")
                 return
 
         if clicked:
@@ -1923,12 +2026,7 @@ class FlowCore(object):
                        self._rapid_reenter_limit,
                        self._rapid_reenter_rounds)
                 )
-                self.bridge.back()
-                # 重进后 ENTER→YEAR→QTY（重新改 6 瓶）→READ→RAPID
-                self._goto(
-                    ENTER_PRODUCT,
-                    u"连点达阈值，自动返回重进刷新…",
-                )
+                self._refresh_detail_in_place(u"连点达阈值，刷新 SKU")
                 return
             self._log(
                 u"自动重进已达 %d 轮上限，停止重进继续连点"
@@ -2021,11 +2119,12 @@ class FlowCore(object):
             remaining = (self.session_target - now).total_seconds()
             if PREHEAT_MIN_LEAD_SECONDS <= remaining <= PREHEAT_LEAD_SECONDS:
                 self._preheated = True
-                self._preheat_pending = True
                 self._log(
-                    u"距开售 %.0f 秒，先进入详情页预热资源…" % remaining
+                    u"距开售 %.0f 秒，先切一次年份预热 SKU…" % remaining
                 )
-                self._goto(ENTER_PRODUCT, u"预热详情页…")
+                # 新模型不离开详情页：预热改成页内切一次年份，
+                # 让 H5 把该 SKU 的数据先拉一遍。
+                self._switch_year()
                 return
 
         if now < self.session_target:
@@ -2074,18 +2173,19 @@ class FlowCore(object):
             return
 
         if page == u"detail":
-            # 业务规则：按钮只有在"整点整秒之后重新加载详情页"才会
-            # 刷新成「立即抢购」。整点还停在详情页说明是旧页面，
-            # 先退回列表，下一拍重进；退回失败才按当前页继续识别。
-            if self._detail_backs < 3:
-                self._detail_backs += 1
+            # 新模型：等待期一直停在详情页（用另一个年份占位）。
+            # 到点把目标年份点回来，SKU 重新拉取 → 按钮刷新成「立即购买」。
+            target_year = self.year_target or YEAR_TARGET_TEXT
+            if self._click_year_cell(target_year):
                 self._log(
-                    u"整点已在详情页（旧页面），退回列表准备重进"
+                    u"开售整点到达，点回目标年份 %s 刷新 SKU" % target_year
                 )
-                self.bridge.back()
-                self.status = u"退回列表，准备重新进入…"
+                self._goto(SELECT_QTY, u"整点已到，点回年份并确认数量…")
+                # SKU 刚切回来，按钮可能处于半刷新状态：连读两次再点
+                self._buy_confirm_pending = True
+                self._buy_confirm_count = 0
                 return
-            self._log(u"详情页退回失败，按当前页继续识别")
+            self._log(u"点不回目标年份，按当前页继续识别")
             self._goto(SELECT_YEAR, u"整点已在详情，识别年份规格…")
             return
 

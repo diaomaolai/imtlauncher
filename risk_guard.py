@@ -23,6 +23,8 @@ from config import (
     RISK_KILL_TEXTS,
     RISK_CHECK_INTERVAL,
     RISK_COOLDOWN_SECONDS,
+    RISK_COOLDOWN_STEP,
+    RISK_COOLDOWN_MAX,
     RISK_MAX_RELAUNCH,
     IGNORED_FOREGROUND_PACKAGES,
 )
@@ -110,12 +112,16 @@ class RiskGuardian(threading.Thread):
     def recover(self, reason):
         """冷却 → 重拉 → 通知状态机回 NAV。"""
         self.relaunch_count += 1
-        self._log(
-            u"风控自愈：%s；冷却 %.0f 秒后重拉（本场第 %d/%d 次）"
-            % (reason, self.cooldown,
-               self.relaunch_count, self.max_relaunch)
+        # 被反复杀时冷却逐步加长，避免「一杀就拉、一拉又被杀」的高频死循环
+        wait_seconds = min(
+            self.cooldown + (self.relaunch_count - 1) * RISK_COOLDOWN_STEP,
+            RISK_COOLDOWN_MAX,
         )
-        self._stop.wait(self.cooldown)
+        self._log(
+            u"风控自愈：%s；冷却 %.0f 秒后重拉（本场第 %d 次）"
+            % (reason, wait_seconds, self.relaunch_count)
+        )
+        self._stop.wait(wait_seconds)
         if self._stop.is_set() or self.flow.is_done:
             return False
         try:
@@ -144,7 +150,8 @@ class RiskGuardian(threading.Thread):
                 now = datetime.now()
             if not in_sale_window(now):
                 continue
-            if self.relaunch_count >= self.max_relaunch:
+            if self.max_relaunch and self.max_relaunch > 0 \
+                    and self.relaunch_count >= self.max_relaunch:
                 continue
             reason = self.detect()
             if reason is None:

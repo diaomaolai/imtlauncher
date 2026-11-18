@@ -135,24 +135,22 @@ class AutoReenterTest(unittest.TestCase):
     def _goto_year(self):
         self.flow._goto(SELECT_YEAR, u"进入详情…")
 
-    def test_preheat_enters_detail_then_backs_to_wait(self):
-        """开售前 45~90 秒：先进详情预热，加载完回列表，且只预热一次"""
+    def test_preheat_switches_year_and_stays_in_wait(self):
+        """开售前 45~90 秒：切一次年份预热 SKU，仍停在 WAIT，且只预热一次"""
+        self.bridge.spec_ready = True
         self.flow.session_target = self.now + timedelta(seconds=60)
         self.flow._goto(WAIT_TIME, u"等待整点…")
         self.flow.update(0.2, self.now)
-        self.assertEqual(self.flow.state, ENTER_PRODUCT)
-        self.assertTrue(self.flow._preheat_pending)
-        self.assertTrue(self.flow._preheated)
-        # 详情页加载完成 → back 回列表等待
-        self.bridge.spec_ready = True
-        self.flow._goto(WAIT_DETAIL, u"预热中…")
-        self.flow.update(0.1, self.now)
         self.assertEqual(self.flow.state, WAIT_TIME)
-        self.assertFalse(self.flow._preheat_pending)
-        self.assertEqual(self.bridge.back_count, 1)
+        self.assertTrue(self.flow._preheated)
+        # 切年份往返 = 两次年份点击，不再退列表
+        self.assertEqual(self.bridge.year_clicks, 2)
+        self.assertEqual(self.bridge.back_count, 0)
         # 再等一拍：不重复预热
+        before = self.bridge.year_clicks
         self.flow.update(0.2, self.now)
         self.assertEqual(self.flow.state, WAIT_TIME)
+        self.assertEqual(self.bridge.year_clicks, before)
 
     def test_default_year_skips_year_click(self):
         """UI 选的正是页面默认年份 → 不点年份，直接进数量"""
@@ -194,8 +192,8 @@ class AutoReenterTest(unittest.TestCase):
         self.assertEqual(self.bridge.plus_taps, 4)
         self.assertEqual(self.flow.state, READ_DETAIL)
 
-    def test_reenter_after_threshold_clicks(self):
-        """连点达到阈值 5：自动 back 重进，进 ENTER，轮次 +1。"""
+    def test_reenter_after_threshold_switches_year(self):
+        """连点达到阈值：页内切年份刷新（不回列表），轮次 +1。"""
         self._goto_year()
         self.bridge.spec_ready = True
         # 走到 RAPID（含 READ 首点 + 改数量）
@@ -204,13 +202,13 @@ class AutoReenterTest(unittest.TestCase):
             if self.flow.state == RAPID_BUY:
                 break
         self.assertEqual(self.flow.state, RAPID_BUY)
-        # RAPID 内连点到阈值后自动重进
+        # RAPID 内连点到阈值后自动页内刷新 → 回到 SELECT_QTY 重新确认数量
         for _ in range(200):
             self.flow.update(0.01, self.now)
-            if self.flow.state == ENTER_PRODUCT:
+            if self.flow.state == SELECT_QTY:
                 break
-        self.assertEqual(self.flow.state, ENTER_PRODUCT)
-        self.assertGreaterEqual(self.bridge.back_count, 1)
+        self.assertEqual(self.flow.state, SELECT_QTY)
+        self.assertEqual(self.bridge.back_count, 0, u"不应退回列表")
         self.assertEqual(self.flow._rapid_reenter_rounds, 1)
 
     def test_no_reenter_before_threshold(self):
