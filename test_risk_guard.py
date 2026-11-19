@@ -165,7 +165,6 @@ class FlowResetTest(unittest.TestCase):
         flow = FlowCore(FakeBridge(), None)
         flow.profile = None
         flow._preheated = True
-        flow._preheat_pending = True
         flow._soldout_pending = True
         flow._rapid_click_count = 7
         flow._rapid_reenter_rounds = 3
@@ -175,7 +174,6 @@ class FlowResetTest(unittest.TestCase):
 
         self.assertEqual(flow.state, NAVIGATE_IGOU)
         self.assertFalse(flow._preheated)
-        self.assertFalse(flow._preheat_pending)
         self.assertFalse(flow._soldout_pending)
         self.assertEqual(flow._rapid_click_count, 0)
         self.assertEqual(flow._rapid_reenter_rounds, 0)

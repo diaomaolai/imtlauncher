@@ -7,10 +7,15 @@
 （i购默认「全部」视图有「鼓乐飞天」，不点经典会误点）。
 
 总原则：
-- 已售罄：需二次确认（返回列表重新进入仍为售罄）才结束启动器，
+- 已售罄：需二次确认（切年份刷新后仍为售罄）才结束启动器，
   这是唯一正常结束；
 - 其余所有情况（立即抢购 / 未来时间 / 已过时间 / 弹窗 / 无响应）
   一律循环，一场接一场，不主动结束。
+
+详情页驻留（v1.8.2）：
+  一旦进入商品详情页就不再离开。所有「刷新界面」的动作都是
+  「点另一个年份 → 点回目标年份」的页内换 SKU，不再退回列表
+  重新点商品（后者要整页重载 2~6 秒，太慢）。
 
 列表确认（防误判）：
   必须同时看到「飞天」+「%vol」商品节点和列表独有标签
@@ -18,7 +23,8 @@
   靠标签排除，防止误点标题导致连点。
 
 循环逻辑：
-1. 定时到点 → 列表双确认 → 点击飞天文字节点（记录位置）→ 进详情；
+1. 定时到点 → 列表双确认 → 点击飞天文字节点（记录位置）→ 进详情
+   （仅首次进入/兜底重进才走这条）；
 2. 进详情第一步先选年份（规格区域内识别并点击目标年份，默认当前
    年份，如 2026），区域限定识别，动态轮询无固定等待；
    年份区域缺失但抢购按钮已渲染时直接放行（防页面改版卡死）；
@@ -29,9 +35,9 @@
    - 立即抢购/立即购买：识别到立刻点，随后进入连点模式：
      点一次 → 独立随机等 0.00~0.99 秒 → 再点一次 → 再随机等 …；
    - 开售时间（按钮"HH:MM投放"，右下角区域）：连续 2 次读数一致
-     才采信；未来时间返回列表等整点（不加秒）；若读到本场时间
-     但已过且仍在宽限内，说明重新加载没刷新到按钮，退出重进；
-   - 已售罄：首次返回列表重新进入复核，第二次仍售罄才结束；
+     才采信；未来时间切到别的年份、在详情页内等整点（不加秒）；
+     若读到本场时间但已过且仍在宽限内，说明没刷新到按钮，切年份刷新；
+   - 已售罄：首次切年份刷新后复核，第二次仍售罄才结束；
    - 未识别到：不中止、不返回，无限等待（应对弹窗/未刷新）；
 4. 连点模式（点击购买后）：
    - 每点一次后独立随机 0.00~0.99 秒（两位数字各自 0-9 随机）再点；
@@ -41,9 +47,11 @@
         WAIT_VERIFY 等待人工验证，等待期间绝不再点任何按钮；
      b) 界面刷新成订单/支付页 → 抢购成功，上报并结束（只上报）；
    - 切换界面前按钮变为开售时间 → 交回详情识别；
-   - 只有识别到「已售罄」才停止：返回列表重新进入复核，
+   - 连点到阈值 → 切年份刷新后继续连点；
+   - 只有识别到「已售罄」才停止：切年份刷新复核，
      二次仍为售罄才结束；
-5. 整点等待：到点点击记录位置进入，先选年份、改数量再交由详情页；
+5. 整点等待：等待期停在详情页（用别的年份占位），到点把目标年份
+   点回来 → 复核数量 → 连读两次「立即购买」才开点；
 6. 弹窗（含风控倒计时）：任何环节只等待，不点任何按钮。
 
 全程通过 AppLogger 打印并写入 txt 日志。
@@ -183,7 +191,6 @@ class FlowCore(object):
         self._soft_hint_logged = None
         # 整点重进计数 / 详情页退回次数（日志与防死循环用）
         self._reenter_count = 0
-        self._detail_backs = 0
         # 数量修改：本拍/累计加号点击
         self._qty_taps = 0
         # 数字读不到时是否已盲点过一次加号
@@ -213,9 +220,9 @@ class FlowCore(object):
         self._color_cache_at = 0.0
         self._color_pending = False
         self._color_state_last = None
-        # 灰色按钮已持续秒数（超过阈值退回列表重新进入）
+        # 灰色按钮已持续秒数（超过阈值切年份刷新）
         self._gray_elapsed = 0.0
-        # 验证弹窗累计等待（超时后退回列表重新进入）
+        # 验证弹窗累计等待（超时后切年份刷新）
         self._verify_total = 0.0
         # YEAR/QTY 宽限按实际执行拍数累计（冻结跳时不会一次吃光）
         self._entry_ticks = 0
@@ -229,7 +236,6 @@ class FlowCore(object):
         self._read_phase = False
         # 预热：本场是否已预热过详情页 / 预热进行中
         self._preheated = False
-        self._preheat_pending = False
         # 服务器时间偏移（秒）：time_sync 校准，整点判定用它
         self.time_offset = 0.0
         # 本次会话是否已刷新过「页面默认年份」（一次截图，非关键路径）
@@ -480,7 +486,10 @@ class FlowCore(object):
     def _stuck_recover(self, next_state, do_back=True):
         """
         当前状态 3 秒没有推进 → 本地恢复（不等重校）。
-        默认 back 回列表再重进；next_state 由调用方指定。
+
+        优先「页内切年份刷新」：成功就留在详情页，回 SELECT_QTY 重新确认；
+        切年份不可用（档案缺年份格 / 页面卡死点不动）才 back 回列表兜底。
+        do_back=False 的调用点在列表侧，不做刷新动作，只换状态。
         """
         if self._state_elapsed < STUCK_RECOVER_SECONDS:
             return False
@@ -489,6 +498,14 @@ class FlowCore(object):
             % (self._state_elapsed, self.state)
         )
         if do_back:
+            if self.state in (
+                SELECT_YEAR, SELECT_QTY, READ_DETAIL, RAPID_BUY,
+            ) and self._switch_year():
+                self._goto(
+                    SELECT_QTY,
+                    u"超时无进展，切年份刷新后重新确认…",
+                )
+                return True
             self.bridge.back()
         self._goto(next_state, u"超时无进展，重新进入…")
         return True
@@ -664,7 +681,6 @@ class FlowCore(object):
         self._soft_hint_count = 0
         self._soft_hint_logged = None
         self._reenter_count = 0
-        self._detail_backs = 0
         self._qty_taps = 0
         self._qty_blind_done = False
         self._entry_wait = 0.0
@@ -688,7 +704,6 @@ class FlowCore(object):
         self._read_phase = False
         # 预热：每场只预热一次；预热进行中标记
         self._preheated = False
-        self._preheat_pending = False
         # 新一场：允许重新识别一次「页面默认年份」
         self._default_year_refreshed = False
         # 新一场：广告自愈重新计数
@@ -754,10 +769,8 @@ class FlowCore(object):
             % (self._risk_kills, reason)
         )
         self._preheated = False
-        self._preheat_pending = False
         self._soldout_pending = False
         self._reenter_count = 0
-        self._detail_backs = 0
         self._entry_ticks = 0
         self._entry_wait = 0.0
         self._slot_fast_done = False
@@ -1121,10 +1134,11 @@ class FlowCore(object):
     def _handle_sale_time(self, hhmm, now):
         """
         读到按钮区开售时间后的统一处理（READ 和 YEAR 预检共用）：
-        - 未来时间：替换当前目标，回列表等到点再精确重进；
-        - 已过但仍在宽限内（默认同一小时）：退回列表立即重进刷新，
+        - 未来时间：替换当前目标，切到别的年份，在详情页内等到点；
+        - 已过但仍在宽限内（默认同一小时）：切年份立即刷新，
           不把本场判成"已过"；
         - 已过且超出宽限：顺延到次日同刻。
+        切年份不可用时退回列表，作为兜底。
         返回 True 表示已处理（调用方直接 return）。
         """
         try:
@@ -1828,23 +1842,22 @@ class FlowCore(object):
                 # 本轮连点达到该随机次数后自动 back 重进刷新
                 self._rapid_reenter_limit = rapid_reenter_count()
                 self._log(
-                    u"本轮自动重进阈值：连点 %d 次后返回上一层重进"
+                    u"本轮自动重进阈值：连点 %d 次后切年份刷新"
                     % self._rapid_reenter_limit
                 )
                 return
 
         # 1b) 文字是立即抢购但按钮还是灰的（禁用态）：不点，等它变黄。
-        #     持续灰色超过阈值说明这次加载没刷新，退回列表重新进入。
+        #     持续灰色超过阈值说明这次加载没刷新，切年份刷新。
         if buy_visible and color == u"gray":
             self._gray_elapsed += dt
             if self._gray_elapsed >= BUTTON_GRAY_REENTER_SECONDS:
                 self._gray_elapsed = 0.0
                 self._log(
-                    u"按钮持续灰色 %.1f 秒仍未变黄，退回列表重新进入刷新"
+                    u"按钮持续灰色 %.1f 秒仍未变黄，切年份刷新"
                     % BUTTON_GRAY_REENTER_SECONDS
                 )
-                self.bridge.back()
-                self._goto(WAIT_TIME, u"按钮未变黄，重新进入刷新…")
+                self._refresh_detail_in_place(u"按钮持续灰色")
                 return
             self._heartbeat_log(
                 dt, u"按钮为灰色（未开售/未刷新），等待变黄…"
@@ -1854,7 +1867,7 @@ class FlowCore(object):
 
         self._gray_elapsed = 0.0
 
-        # 2) 已售罄：需二次确认——先返回列表重新进入，
+        # 2) 已售罄：需二次确认——先切年份刷新，
         #    再次读到的按钮仍为售罄才结束（防 H5 缓存旧状态误判）。
         #    合并一次遍历（L2）+ 分拍检查（减负：单数拍查售罄）
         sold_out = False
@@ -1923,7 +1936,7 @@ class FlowCore(object):
           a) 安全组件（填字/点选）验证弹窗 → 立即停止点击，
              转 WAIT_VERIFY 等待人工验证，期间绝不再点任何按钮；
           b) 界面刷新成订单/支付页 → 抢购成功，上报后结束；
-        - 识别到「已售罄」→ 返回列表重新进入二次复核（唯一正常退出）。
+        - 识别到「已售罄」→ 切年份刷新后二次复核（唯一正常退出）。
         """
         if not self.bridge.is_connected():
             self._finish(
@@ -2012,15 +2025,15 @@ class FlowCore(object):
         else:
             self._rapid_misses = 0
 
-        # 7.5) 自动重进：成功点击达到随机阈值，back 返回上一层再
-        #      重进详情刷新按钮（替代手动返回）。订单页/验证弹窗/
-        #      售罄已在前面优先处理，这里只处理"页面无变化"的情况。
+        # 7.5) 页内刷新：成功点击达到随机阈值后，切年份往返刷新按钮
+        #      （不离开详情页）。订单页/验证弹窗/售罄已在前面优先处理，
+        #      这里只处理"页面无变化"的情况。
         if clicked and self._rapid_reenter_limit > 0 \
                 and self._rapid_click_count >= self._rapid_reenter_limit:
             if self._rapid_reenter_rounds < RAPID_REENTER_MAX_ROUNDS:
                 self._rapid_reenter_rounds += 1
                 self._log(
-                    u"已连点 %d 次（阈值 %d），自动返回上一层再重进"
+                    u"已连点 %d 次（阈值 %d），切年份刷新后继续"
                     u"详情刷新（第 %d 轮）"
                     % (self._rapid_click_count,
                        self._rapid_reenter_limit,
@@ -2080,15 +2093,15 @@ class FlowCore(object):
         self._verify_elapsed = 0.0
 
         # 弹窗长时间无人处理：不能永远停在这里（会挡住后续场次），
-        # 超时后退回列表，按本场时间重新进入刷新。
+        # 超时后切年份刷新；弹窗还挡着点不到年份时，_refresh_detail_in_place
+        # 会自动退回「back + 重新进详情」的兜底。
         if self._verify_total >= VERIFY_TIMEOUT_SECONDS:
             self._log(
-                u"安全验证弹窗持续 %.0f 秒未处理，退回列表重新进入"
+                u"安全验证弹窗持续 %.0f 秒未处理，切年份刷新"
                 % self._verify_total
             )
             self._verify_total = 0.0
-            self.bridge.back()
-            self._goto(WAIT_TIME, u"验证超时，重新进入刷新…")
+            self._refresh_detail_in_place(u"验证超时")
             return
 
         if self._order_page_visible():
@@ -2113,8 +2126,8 @@ class FlowCore(object):
         坐标仅兜底）；igou/home 交 NAV 快速接入；unknown 先拉起。
         每轮重新判定，天然重试，不盲目 goto。
         """
-        # 预热：距开售 45~90 秒之间先进一次详情页加载资源，再回列表
-        # 等到点；整点重进时 H5 已热，第一击更快。每场只预热一次。
+        # 预热：距开售 45~90 秒之间切一次年份，让 H5 先把该 SKU 的数据
+        # 拉一遍（v1.8.2 起不再离开详情页）。每场只预热一次。
         if not self._preheated:
             remaining = (self.session_target - now).total_seconds()
             if PREHEAT_MIN_LEAD_SECONDS <= remaining <= PREHEAT_LEAD_SECONDS:
@@ -2157,8 +2170,6 @@ class FlowCore(object):
                 return
 
         page = self._current_page()
-        if page != u"detail":
-            self._detail_backs = 0
 
         if page == u"unknown":
             # 认不出页面（登录页/开屏广告/加载中）：限频拉起，
@@ -2238,13 +2249,6 @@ class FlowCore(object):
         self._detail_enter_next = DETAIL_ENTER_POLL
 
         if self.bridge.text_exists(u"数量"):
-            # 预热路径：详情页加载完成即回列表，等到点再重进
-            if self._preheat_pending:
-                self._preheat_pending = False
-                self._log(u"预热完成（详情页已加载），返回列表等到点")
-                self.bridge.back()
-                self._goto(WAIT_TIME, u"预热完成，回到列表等待…")
-                return
             self._log(u"已进入详情页，开始识别年份规格")
             self._goto(SELECT_YEAR, u"已进入商品，识别年份规格…")
             return

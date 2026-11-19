@@ -211,6 +211,34 @@ class LaunchBackCycleTest(unittest.TestCase):
         self.assertTrue(flow.success)
         self.assertEqual(phone.page, u"detail")
 
+    def test_stuck_recover_prefers_year_switch(self):
+        """3 秒无进展时：优先切年份刷新，不退回列表"""
+        phone = FakePhone()
+        phone.page = u"detail"
+        flow = FlowCore(phone)
+        flow.profile = None
+        flow.state = READ_DETAIL
+        flow._state_elapsed = 99.0
+
+        self.assertTrue(flow._stuck_recover(ENTER_PRODUCT))
+
+        self.assertEqual(flow.state, SELECT_QTY, u"应回数量重新确认")
+        self.assertEqual(phone.back_count, 0, u"不应退回列表")
+        self.assertEqual(phone.year_clicks, 2, u"应切一次年份往返")
+
+    def test_stuck_recover_falls_back_to_back(self):
+        """切年份不可用时：才 back 回列表兜底"""
+        phone = FakePhone(allow_year_click=False)
+        flow = FlowCore(phone)
+        flow.profile = None
+        flow.state = READ_DETAIL
+        flow._state_elapsed = 99.0
+
+        self.assertTrue(flow._stuck_recover(ENTER_PRODUCT))
+
+        self.assertEqual(flow.state, ENTER_PRODUCT)
+        self.assertEqual(phone.back_count, 1, u"应退回列表兜底")
+
     def test_fallback_when_year_click_unsupported(self):
         """切年份不可用时（旧 APK / 档案缺年份格）→ 退回列表重进的老路径"""
         phone = FakePhone(allow_year_click=False)
