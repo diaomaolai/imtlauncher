@@ -165,6 +165,43 @@ class FakePhone(object):
         return True
 
 
+class TimedPhone(FakePhone):
+    """
+    详情页按钮先显示「09:00投放」，到点后变成「立即抢购」。
+
+    用来验证完整等待时序：进详情 → 切邻格年份 → 等到点 → 切回目标年份
+    → 刷新识别 → 连点。now_ref 是单元素列表，由测试推进。
+    """
+
+    def __init__(self, target, now_ref, allow_year_click=True):
+        super(TimedPhone, self).__init__(allow_year_click)
+        self.target = target
+        self.now_ref = now_ref
+        # 按钮上的投放时间与目标时刻一致（如 09:03）
+        self.time_text = target.strftime(u"%H:%M")
+
+    def _texts(self):
+        texts = set(super(TimedPhone, self)._texts())
+        if self.page == u"detail":
+            texts.discard(u"立即抢购")
+            texts.discard(u"售罄")
+            if self.now_ref[0] < self.target:
+                texts.add(self.time_text + u"投放")
+            else:
+                texts.add(u"立即抢购")
+        return texts
+
+    def find_exact_regex_texts(self, regex):
+        # 到点前整段匹配返回投放时间；到点后页面已刷新成「立即抢购」
+        return [] if self.now_ref[0] >= self.target else [self.time_text]
+
+    def _click(self, text):
+        if text in BUY_NOW_TEXTS and self.page == u"detail":
+            self.buy_clicks += 1
+            return True
+        return super(TimedPhone, self)._click(text)
+
+
 class LaunchBackCycleTest(unittest.TestCase):
 
     def test_inplace_refresh_on_soldout(self):
@@ -239,8 +276,33 @@ class LaunchBackCycleTest(unittest.TestCase):
         self.assertEqual(flow.state, ENTER_PRODUCT)
         self.assertEqual(phone.back_count, 1, u"应退回列表兜底")
 
-    def test_fallback_when_year_click_unsupported(self):
-        """切年份不可用时（旧 APK / 档案缺年份格）→ 退回列表重进的老路径"""
+    def test_wait_switches_out_then_back_at_target(self):
+        """完整时序：进详情→切邻格年份→等到点→切回目标年份→识别→连点"""
+        target = START + timedelta(seconds=180)
+        now_ref = [START]
+        phone = TimedPhone(target, now_ref)
+        flow = FlowCore(phone)
+        flow.profile = None
+        flow.on_launch_app = phone.launch
+        flow.reset(target, launch_target=START)
+
+        now = START
+        for _ in range(200000):
+            flow.update(DT, now)
+            now_ref[0] = now
+            if flow.state == RAPID_BUY and phone.buy_clicks > 0:
+                break
+            now += timedelta(seconds=DT)
+
+        self.assertEqual(flow.state, RAPID_BUY, u"应进入连点")
+        self.assertEqual(phone.product_clicks, 1, u"只进一次详情")
+        self.assertEqual(phone.back_count, 0, u"全程不返回上一层")
+        self.assertGreaterEqual(phone.year_clicks, 3, u"应切出去再切回来")
+        self.assertGreaterEqual(phone.buy_clicks, 1, u"应点到立即抢购")
+        self.assertEqual(phone.qty, QTY_TARGET, u"切回后数量要重新改到 6")
+
+    def test_soldout_ends_when_year_click_unsupported(self):
+        """切年份不可用（旧 APK / 档案缺年份格）：无法二次复核，直接结束"""
         phone = FakePhone(allow_year_click=False)
         flow = FlowCore(phone)
         flow.profile = None
@@ -258,9 +320,11 @@ class LaunchBackCycleTest(unittest.TestCase):
             now += timedelta(seconds=DT)
 
         self.assertEqual(flow.state, DONE)
-        self.assertIn(ENTER_PRODUCT, states, u"兜底应走回 ENTER 重进详情")
-        self.assertEqual(phone.product_clicks, 2, u"兜底路径应重进详情一次")
-        self.assertEqual(phone.back_count, 1, u"只 back 一次（第二次直接结束）")
+        self.assertTrue(flow.success)
+        # 新模型：不返回上一层，也不再重进详情
+        self.assertNotIn(ENTER_PRODUCT, states, u"不应回到 ENTER 重进")
+        self.assertEqual(phone.product_clicks, 1)
+        self.assertEqual(phone.back_count, 0)
         self.assertEqual(phone.year_clicks, 0)
 
 

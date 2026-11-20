@@ -128,7 +128,7 @@ class ButtonColorTest(unittest.TestCase):
         self.assertEqual(flow.state, RAPID_BUY)
 
     def test_gray_time_button_waits_for_target(self):
-        """灰色 + 09:00投放：读时间、回列表等待，不点（时间分拍检查）"""
+        """灰色 + 09:00投放：读时间、切年份等待，不点（时间分拍检查）"""
         bridge = ColorBridge(rgb=GRAY, button=u"09:00投放",
                              time_text=u"09:00")
         flow = make_flow(bridge, datetime(2026, 11, 2, 8, 59, 0))
@@ -143,7 +143,8 @@ class ButtonColorTest(unittest.TestCase):
         self.assertEqual(
             flow.session_target, datetime(2026, 11, 2, 9, 0, 0)
         )
-        self.assertEqual(bridge.backs, 1)
+        # 新模型：不返回上一层（切年份失败也只打标记）
+        self.assertEqual(bridge.backs, 0)
 
     def test_restock_text_is_time_state(self):
         """灰色 + 09:05备货中：同样按时间处理"""

@@ -106,7 +106,9 @@ class ButtonTimeTest(unittest.TestCase):
         self.assertEqual(
             flow.session_target, datetime(2026, 11, 2, 9, 0, 0)
         )
-        self.assertEqual(bridge.backs, 1)
+        # 新模型：不返回上一层；切年份失败只打标记，等待期继续重试
+        self.assertEqual(bridge.backs, 0)
+        self.assertTrue(flow._pending_switch)
 
     def test_restock_prefix_is_matched(self):
         """实拍格式「补货中 ~ 09:25投放」：整段匹配要能取到 09:25"""

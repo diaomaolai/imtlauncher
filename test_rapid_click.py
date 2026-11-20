@@ -3,7 +3,7 @@
 抢购连点逻辑单元测试（电脑端可直接运行，无需安卓环境）。
 
 覆盖业务口径：
-1. 每点一次后独立随机等 0.00~0.99 秒再点下一次（不是攒连击）；
+1. 每点一次后独立随机等 0.00~0.09 秒再点下一次（不是攒连击）；
 2. 出现安全组件（填字/点选）验证弹窗 → 立即停止点击，只等待；
 3. 等待期间界面刷新成订单/支付页 → 上报一次并结束（不点击）；
 4. 验证弹窗关闭、回到详情页 → 继续连点；
@@ -24,6 +24,7 @@ from flow_core import (
     READ_DETAIL,
     WAIT_VERIFY,
     ENTER_PRODUCT,
+    DONE,
 )
 
 BUY = u"立即抢购"
@@ -177,11 +178,13 @@ class RapidClickTest(unittest.TestCase):
         self.assertEqual(self.flow.state, RAPID_BUY)
         self.assertGreater(self.bridge.buy_clicks, 3)
 
-    def test_sold_out_goes_to_recheck(self):
-        """售罄仍走二次复核"""
+    def test_sold_out_ends_when_cannot_switch_year(self):
+        """售罄但切年份不可用：无法二次复核，直接结束（不返回上一层）"""
         self.bridge.soldout = True
         self._run(0.5)
-        self.assertEqual(self.flow.state, ENTER_PRODUCT)
+        self.assertEqual(self.flow.state, DONE)
+        self.assertTrue(self.flow.success)
+        self.assertEqual(self.bridge.back_count, 0, u"不应退回列表")
 
     def test_buy_confirmation_requires_two_ticks(self):
         """点回目标年份后：按钮要连读两次可点，才真正点下去"""

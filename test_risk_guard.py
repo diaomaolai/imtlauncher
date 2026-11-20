@@ -185,7 +185,7 @@ class FlowResetTest(unittest.TestCase):
         flow = FlowCore(FakeBridge(), None)
         flow.profile = None
         for value in [flow.click_delay() for _ in range(40)]:
-            self.assertTrue(0.0 <= value <= 0.99)
+            self.assertTrue(0.0 <= value <= 0.09)
 
         flow._risk_kills = 1
         for value in [flow.click_delay() for _ in range(40)]:
